@@ -1,0 +1,26 @@
+Copyright (c) 2026 Vikash Kumaran. All rights reserved.
+
+This repository and everything in it (the "Software") is proprietary. It is
+published so that it can be viewed, not so that it can be reused.
+
+No licence is granted. Without prior written permission from the copyright
+holder you may not copy, modify, merge, publish, distribute, sublicense, sell,
+host, or deploy the Software or any part of it, or create derivative works
+from it.
+
+Viewing the source on GitHub, and forking it within GitHub as GitHub's Terms of
+Service allow, does not grant any of the rights above.
+
+Using the Groupflicks website as hosted by the copyright holder is not
+restricted by this notice. People the copyright holder adds to the repository
+as collaborators may work on the Software for this project; their access does
+not give them the right to reuse or redistribute it elsewhere.
+
+Third-party components keep their own licences. JSZip, in docs/vendor/, is
+licensed under the MIT licence or GPLv3; see docs/vendor/JSZIP-LICENSE.md.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED. IN NO EVENT SHALL THE COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM,
+DAMAGES OR OTHER LIABILITY ARISING FROM THE SOFTWARE OR ITS USE.
+
+For permission requests, open an issue on the repository.
