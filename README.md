@@ -43,6 +43,7 @@ To run it locally, serve `docs/` on localhost: `python3 -m http.server 8000 --di
 - The link is the key. Anyone who gets it can see the album, add photos and remove photos. If everyone loses the link, the album cannot be recovered.
 - Links to albums you have opened are remembered in that browser's local storage so they show on the home screen.
 - Other devices pick up changes by checking every five seconds.
+- Photos stay until someone removes them. The person who created an album can delete the whole album, with its files, from Album options, in the browser they created it in.
 - Photos are resized to 2048 px before upload, so downloads are not the originals.
 - Nothing limits how many albums or uploads a visitor can create. Add rate limits before sharing the site widely.
 - The face-api script is loaded from a CDN without an integrity hash. Vendoring it into `docs/vendor/` would remove that trust.

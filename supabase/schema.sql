@@ -97,6 +97,15 @@ begin
     limit 5000;
 end $$;
 
+-- Deletes an album and every record in it. The app removes the encrypted photo files
+-- through the Storage API first; this removes the rows.
+create or replace function public.gf_delete_album(p_album text, p_token text)
+returns void language plpgsql security definer set search_path = public as $$
+begin
+  perform gf_check(p_album, p_token);
+  delete from gf_albums where id = p_album;
+end $$;
+
 -- Used by the storage rules below. Album ids are 128-bit random values, so knowing
 -- that one exists means you already have the link.
 create or replace function public.gf_album_exists(p_album text)
@@ -110,6 +119,7 @@ grant execute on function
   public.gf_put(text, text, text, text, text),
   public.gf_delete(text, text, text),
   public.gf_list(text, text, bigint),
+  public.gf_delete_album(text, text),
   public.gf_album_exists(text)
 to anon, authenticated;
 
