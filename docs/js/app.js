@@ -529,7 +529,7 @@ function renderDock(){
 }
 function viewPeople(){
   const ppl = peopleList(), me = myPerson();
-  const intro = Face.state === 'ready' ? 'Faces are grouped automatically as photos come in. Name a group once and the name sticks. Give two groups the same person by merging them.'
+  const intro = Face.state === 'ready' ? 'Faces are grouped automatically as photos come in. Name a group once and the name sticks. If the same person shows up as two groups, open one and combine it with the other.'
     : Face.state === 'loading' ? 'Loading face grouping…'
     : 'Automatic face grouping could not load on this device, so people are tagged by hand: open a photo, or pick several, and tag who is in them. Filters, downloads and the reel work from those tags.';
   return h('div', null,
@@ -614,15 +614,27 @@ function photoDialog(p){
         if (e.currentTarget.dataset.sure){ closeDlg(); store.delPhoto(S.tripId, p).catch(() => toast("Couldn't remove it.")); }
         else { e.currentTarget.dataset.sure = 1; e.currentTarget.textContent = 'Tap again to remove for everyone'; } }}, 'Remove')));
 }
+/* two face groups that are really one person: point one at the other, so every photo counts once */
+async function mergePeople(from, into){
+  if (!into.name && from.name) await store.putPerson(S.tripId, into.id, {name: from.name});
+  await store.putPerson(S.tripId, from.id, {mergedInto: into.id});
+  S.filter.people = [...new Set(S.filter.people.map(id => id === from.id ? into.id : id))];
+}
+function mergedInto(id){ return Object.keys(S.people).filter(k => S.people[k].mergedInto && k !== id && root(k) === id); }
+function groupFace(id){
+  let best = null, area = 0;
+  for (const p of S.photos) for (const f of p.faces || []) if (f.p === id && f.b[2] * f.b[3] > area){ area = f.b[2] * f.b[3]; best = {thumb: p.thumb, b: f.b, r: p.h / p.w}; }
+  return {name: S.people[id]?.name || '', cover: best};
+}
 function personDialog(e){
-  const isNew = !e, me = myPerson();
+  const isNew = !e, me = myPerson(), others = isNew ? [] : peopleList().filter(o => o.id !== e.id), parts = isNew ? [] : mergedInto(e.id);
   const save = async ev => {
     ev.preventDefault(); const name = $('#person-name').value.trim();
     try {
       if (isNew){ if (name) await newPerson(name); }
       else {
         const twin = name && peopleList().find(o => o.id !== e.id && o.name.toLowerCase() === name.toLowerCase());
-        if (twin){ await store.putPerson(S.tripId, e.id, {mergedInto: twin.id}); toast('Merged with ' + twin.name); }
+        if (twin){ await mergePeople(e, twin); toast('Combined with ' + twin.name); }
         else await store.putPerson(S.tripId, e.id, {name});
       }
     } catch (err){ toast("Couldn't save. Check your connection."); }
@@ -632,7 +644,15 @@ function personDialog(e){
     !isNew && h('div', {class: 'row', style: {alignItems: 'center'}}, avatar(e), h('span', {style: {color: 'var(--muted)'}}, 'In ' + plural(e.count, 'photo'))),
     h('form', {class: 'row', onsubmit: save}, h('div', {class: 'field'}, h('label', {for: 'person-name'}, 'Name'), h('input', {id: 'person-name', value: e?.name || '', maxlength: 40, placeholder: 'Maya', disabled: !S.canWrite})),
       S.canWrite && h('button', {class: 'btn primary', type: 'submit'}, 'Save')),
-    !isNew && h('p', {style: {margin: 0, color: 'var(--muted)', fontSize: '14px'}}, 'Typing a name that another group already has merges the two.'),
+    !isNew && S.canWrite && others.length > 0 && h('div', {class: 'panel'}, h('strong', null, 'Same person as another group?'),
+      h('p', {style: {margin: '6px 0 10px', color: 'var(--muted)', fontSize: '14px'}}, 'Tap the other group to combine them. Their photos are counted together from then on.'),
+      h('div', {class: 'pick-list'}, others.map(o => h('button', {class: 'chip', type: 'button', onclick: async () => {
+        try { await mergePeople(e, o); toast(`Combined into ${o.name || e.name || 'one person'}.`); } catch (err){ toast("Couldn't combine them. Check your connection."); }
+        closeDlg(); }}, avatar(o), personLabel(o), h('span', {style: {color: 'var(--muted)'}}, o.count))))),
+    !isNew && S.canWrite && parts.length > 0 && h('div', {class: 'panel'}, h('strong', null, 'Combined from'),
+      h('p', {style: {margin: '6px 0 10px', color: 'var(--muted)', fontSize: '14px'}}, 'Split a group back out if it was combined by mistake.'),
+      h('div', {class: 'pick-list'}, parts.map(id => h('span', {class: 'chip'}, avatar(groupFace(id)), groupFace(id).name || 'Group',
+        h('button', {class: 'btn small quiet', type: 'button', onclick: async () => { try { await store.putPerson(S.tripId, id, {mergedInto: null}); toast('Split back out.'); } catch (err){ toast("Couldn't split it. Check your connection."); } closeDlg(); }}, 'Split'))))),
     !isNew && h('div', {class: 'row'},
       h('button', {class: 'btn', type: 'button', onclick: () => { S.filter.people = [e.id]; S.filter.only = false; S.tab = 'photos'; closeDlg(); render(); }}, 'Show their photos'),
       e.id !== me && S.me.id !== 'anon' && h('button', {class: 'btn', type: 'button', onclick: async () => { await setMe(e.id); closeDlg(); }}, 'This is me')));
@@ -926,11 +946,11 @@ const Reel = {
   },
   async play(record){
     const cv = $('#reel-canvas'), status = $('#reel-status'), bar = $('#reel-prog');
-    if (!cv) return; this.stop(); this.setBusy(true); status.textContent = 'Getting the cut ready…';
+    if (!cv) return; this.stop(); this.showCanvas(); this.setBusy(true); status.textContent = 'Getting the cut ready…';
     // the audio context must start inside the click
     try { this.ac ||= new (window.AudioContext || window.webkitAudioContext)(); await this.ac.resume(); } catch (e){ this.ac = null; }
     let tl; try { tl = await this.prepare(m => { status.textContent = m; }); } catch (e){ status.textContent = e.message === 'empty' ? 'No photos to cut from. Add photos or change who the reel is about.' : "Couldn't load the photos. Try again."; this.setBusy(false); return; }
-    const [W, H] = reelSize(this.opts); cv.width = W; cv.height = H; cv.hidden = false; $('#reel-video').hidden = true;
+    const [W, H] = reelSize(this.opts); cv.width = W; cv.height = H;
     const c = cv.getContext('2d'), ac = this.ac; let dest = null, chunks = [], mime = '';
     this.draw(c, W, H, 0);
     if (record){
@@ -961,7 +981,6 @@ const Reel = {
           this.out = {blob: new Blob(chunks, {type}), name: `${slug(S.trip?.name)}-reel.${ext}`};
           const v = $('#reel-video'); if (v){ v.src = URL.createObjectURL(this.out.blob); v.hidden = false; cv.hidden = true; $('#reel-save').hidden = false; }
           status.textContent = `Video ready · ${W}×${H} · ${Math.round(tl.total)} s · ${(this.out.blob.size / 1048576).toFixed(1)} MB`; this.setBusy(false); this.rec = null;
-          saveFile(this.out.name, this.out.blob);
         };
         rec.stop();
       } else { status.textContent = `${plural(tl.n, 'photo')} · ${Math.round(tl.total)} s`; this.setBusy(false); }
@@ -974,6 +993,12 @@ const Reel = {
     };
     this.raf = requestAnimationFrame(frame);
   },
+  /* back to the live preview: any finished video no longer matches the settings, so drop it */
+  showCanvas(){
+    const v = $('#reel-video'), cv = $('#reel-canvas'), save = $('#reel-save');
+    if (v){ if (v.src){ try { v.pause(); } catch (e){} URL.revokeObjectURL(v.src); v.removeAttribute('src'); v.load(); } v.hidden = true; }
+    if (cv) cv.hidden = false; if (save) save.hidden = true; this.out = null;
+  },
   setBusy(b){ document.querySelectorAll('[data-reel-go]').forEach(el => el.disabled = b); }
 };
 function viewReel(){
@@ -983,6 +1008,7 @@ function viewReel(){
   let posterRun = 0;
   const poster = async () => {
     const run = ++posterRun, st = () => $('#reel-status');
+    if (!Reel.playing) Reel.showCanvas();
     try {
       await Reel.prepare(m => { if (run === posterRun && st() && !Reel.playing) st().textContent = m; });
       const cv = $('#reel-canvas'); if (!cv || Reel.playing || run !== posterRun) return;
@@ -1017,8 +1043,8 @@ function viewReel(){
         h('button', {class: 'btn', type: 'button', 'data-reel-go': 1, onclick: () => Reel.play(false)}, 'Preview'),
         h('button', {class: 'btn primary', type: 'button', 'data-reel-go': 1, onclick: () => Reel.play(true)}, 'Make the video'),
         h('button', {class: 'btn quiet', type: 'button', id: 'reel-stop', hidden: true, onclick: () => { Reel.stop(); Reel.setBusy(false); $('#reel-stop').hidden = true; $('#reel-status').textContent = 'Stopped'; }}, 'Stop'),
-        h('button', {class: 'btn', type: 'button', id: 'reel-save', hidden: true, onclick: () => Reel.out && saveFile(Reel.out.name, Reel.out.blob)}, 'Save video again')),
-      h('p', {class: 'note'}, 'The video records in real time, so a 30 second reel takes 30 seconds. Keep this tab in front while it records. If the picture stutters, switch Quality to Standard. The built-in tracks are generated here and are free to post.')));
+        h('button', {class: 'btn primary', type: 'button', id: 'reel-save', hidden: true, onclick: () => Reel.out && saveFile(Reel.out.name, Reel.out.blob)}, 'Save video')),
+      h('p', {class: 'note'}, 'The video records in real time, so a 30 second reel takes 30 seconds. Keep this tab in front while it records, then press Save video. Changing any setting replaces the video with a fresh preview. If the picture stutters, switch Quality to Standard. The built-in tracks are generated here and are free to post.')));
 }
 
 /* ───────── routing and boot ───────── */
