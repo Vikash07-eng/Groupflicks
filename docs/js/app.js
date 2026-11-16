@@ -38,7 +38,7 @@ const myId = LS.get('uid') || 'u' + rid(12); LS.set('uid', myId);
 const S = {
   cloud: !!(CFG.supabaseUrl && CFG.supabaseAnonKey), me: {id: myId, name: LS.get('name', '')}, canWrite: true, canUpload: true, isOwner: false,
   trips: LS.get('trips', []), tripId: null, trip: null, photos: [], people: {}, members: {}, tripLoaded: false, slow: false, creating: false,
-  tab: 'photos', filter: {person: null, by: null}, selecting: false, sel: new Set(), work: ''
+  tab: 'photos', filter: {people: [], only: false, by: null}, selecting: false, sel: new Set(), work: ''
 };
 
 /* ───────── encryption: everything is sealed in the browser before it leaves ─────────
@@ -149,7 +149,7 @@ function closeTrip(){
 }
 async function openTrip(id, secret){
   closeTrip();
-  Object.assign(S, {tripId: id, tab: 'photos', filter: {person: null, by: null}, selecting: false, sel: new Set()});
+  Object.assign(S, {tripId: id, tab: 'photos', filter: {people: [], only: false, by: null}, selecting: false, sel: new Set()});
   A.id = id; A.secret = secret; changed();
   try {
     const k = await deriveKeys(secret, id); if (A.id !== id) return;
@@ -233,10 +233,17 @@ function avatar(e, cls){
   } else el.textContent = (e?.name || '?').trim().slice(0, 2).toUpperCase();
   return el;
 }
+/* the people filter: a photo must contain everyone picked, and with "only" set, nobody else */
+const pickedPeople = () => [...new Set(S.filter.people.map(root))];
+function matchPeople(p){ const want = pickedPeople(), s = photoPeople(p); return want.every(id => s.has(id)) && (!S.filter.only || s.size === want.length); }
+function pickedLabel(){
+  const me = myPerson(), all = peopleList(), names = pickedPeople().map(id => id === me ? 'you' : personLabel(all.find(e => e.id === id) || {}));
+  return (names.length > 1 ? names.slice(0, -1).join(', ') + ' and ' + names[names.length - 1] : names[0]) + (S.filter.only ? ', no one else' : '');
+}
 function shown(){
   let list = [...S.photos].sort((a, b) => (a.takenAt || a.at) - (b.takenAt || b.at));
   const f = S.filter;
-  if (f.person) list = list.filter(p => photoPeople(p).has(f.person));
+  if (f.people.length) list = list.filter(matchPeople);
   if (f.by) list = list.filter(p => p.by === f.by);
   return list;
 }
@@ -452,13 +459,14 @@ function viewTrip(){
     S.tab === 'photos' ? viewPhotos() : S.tab === 'people' ? viewPeople() : viewReel());
 }
 function chipsRow(){
-  const ppl = peopleList().filter(e => e.count), me = myPerson(), f = S.filter;
-  const set = id => { f.person = f.person === id ? null : id; S.sel.clear(); render(); };
+  const ppl = peopleList().filter(e => e.count), me = myPerson(), f = S.filter, on = pickedPeople();
+  const set = id => { f.people = on.includes(id) ? on.filter(x => x !== id) : [...on, id]; if (!f.people.length) f.only = false; S.sel.clear(); render(); };
   return h('div', {class: 'chips'},
-    h('button', {class: 'chip plain', type: 'button', 'aria-pressed': String(!f.person), onclick: () => { f.person = null; render(); }}, 'Everyone'),
-    me ? h('button', {class: 'chip', type: 'button', 'aria-pressed': String(f.person === me), onclick: () => set(me)}, avatar(ppl.find(e => e.id === me) || {name: 'Me'}), 'Me')
+    h('button', {class: 'chip plain', type: 'button', 'aria-pressed': String(!on.length), onclick: () => { f.people = []; f.only = false; S.sel.clear(); render(); }}, 'Everyone'),
+    me ? h('button', {class: 'chip', type: 'button', 'aria-pressed': String(on.includes(me)), onclick: () => set(me)}, avatar(ppl.find(e => e.id === me) || {name: 'Me'}), 'Me')
        : h('button', {class: 'chip plain', type: 'button', onclick: findMeDialog}, 'Find me'),
-    ppl.filter(e => e.id !== me).map(e => h('button', {class: 'chip', type: 'button', 'aria-pressed': String(f.person === e.id), onclick: () => set(e.id)}, avatar(e), personLabel(e), h('span', {style: {color: 'var(--muted)'}}, e.count))));
+    ppl.filter(e => e.id !== me).map(e => h('button', {class: 'chip', type: 'button', 'aria-pressed': String(on.includes(e.id)), onclick: () => set(e.id)}, avatar(e), personLabel(e), h('span', {style: {color: 'var(--muted)'}}, e.count))),
+    on.length > 0 && h('button', {class: 'chip plain only', type: 'button', 'aria-pressed': String(f.only), title: 'Hide photos that have anyone else in them', onclick: () => { f.only = !f.only; S.sel.clear(); render(); }}, on.length > 1 ? 'Just them' : on[0] === me ? 'Just me' : 'Just this person'));
 }
 function viewPhotos(){
   const list = shown(), all = [...S.photos].sort((a, b) => (a.takenAt || a.at) - (b.takenAt || b.at));
@@ -471,7 +479,7 @@ function viewPhotos(){
       h('span', {class: 'edge'}, h('span', null, '▸ ' + String(n).padStart(2, '0') + 'A'), h('span', null, nameOf(p.by).toUpperCase().slice(0, 12))));
   });
   frames.forEach(fr => fr.insertAdjacentHTML('beforeend', RING));
-  const who = S.filter.person ? (S.filter.person === myPerson() ? 'you' : personLabel(peopleList().find(e => e.id === S.filter.person) || {})) : null;
+  const who = S.filter.people.length ? pickedLabel() : null;
   return h('div', null, chipsRow(),
     h('div', {class: 'tools'},
       h('span', {class: 'count'}, who ? `${plural(list.length, 'photo')} with ${who}` : plural(list.length, 'photo')),
@@ -494,10 +502,10 @@ function renderDock(){
         h('button', {class: 'btn small quiet', type: 'button', onclick: () => { list.forEach(p => S.sel.add(p.id)); render(); }}, 'Circle all'),
         S.canWrite && h('button', {class: 'btn small', type: 'button', disabled: !picked.length, onclick: () => tagDialog(picked)}, "Tag who's in these"),
         h('button', {class: 'btn small primary', type: 'button', disabled: !picked.length, onclick: () => downloadPhotos(picked)}, 'Download ' + picked.length)))));
-  } else if (S.filter.person || S.filter.by){
+  } else if (S.filter.people.length || S.filter.by){
     dock.replaceChildren(h('div', {class: 'dock'}, h('div', null,
       h('span', null, 'Filtered to ', h('strong', null, plural(list.length, 'photo'))),
-      h('button', {class: 'btn primary', type: 'button', disabled: !list.length, onclick: () => downloadPhotos(list)}, `Download these ${list.length}`))));
+      h('button', {class: 'btn primary', type: 'button', disabled: !list.length, onclick: () => downloadPhotos(list)}, list.length === 1 ? 'Download this photo' : `Download these ${list.length}`))));
   } else dock.replaceChildren();
 }
 function viewPeople(){
@@ -588,12 +596,12 @@ function personDialog(e){
       S.canWrite && h('button', {class: 'btn primary', type: 'submit'}, 'Save')),
     !isNew && h('p', {style: {margin: 0, color: 'var(--muted)', fontSize: '14px'}}, 'Typing a name that another group already has merges the two.'),
     !isNew && h('div', {class: 'row'},
-      h('button', {class: 'btn', type: 'button', onclick: () => { S.filter.person = e.id; S.tab = 'photos'; closeDlg(); render(); }}, 'Show their photos'),
+      h('button', {class: 'btn', type: 'button', onclick: () => { S.filter.people = [e.id]; S.filter.only = false; S.tab = 'photos'; closeDlg(); render(); }}, 'Show their photos'),
       e.id !== me && S.me.id !== 'anon' && h('button', {class: 'btn', type: 'button', onclick: async () => { await setMe(e.id); closeDlg(); }}, 'This is me')));
 }
 async function setMe(pid){ try { await store.putMember(S.tripId, {me: pid}); toast("Got it. Use the Me filter to see your photos."); } catch (e){ S.members[S.me.id] = {...S.members[S.me.id], me: pid}; changed(); } }
 function findMeDialog(){
-  const pick = async id => { await setMe(id); S.filter.person = id; S.tab = 'photos'; closeDlg(); render(); };
+  const pick = async id => { await setMe(id); S.filter.people = [id]; S.filter.only = false; S.tab = 'photos'; closeDlg(); render(); };
   openDlg(h('h2', null, 'Which one is you?'),
     Face.state === 'ready' && h('div', {class: 'row'}, h('button', {class: 'btn primary', type: 'button', onclick: () => $('#file-selfie').click()}, 'Match me with a selfie'), h('span', {class: 'busy', id: 'selfie-status'})),
     Face.state === 'ready' && h('p', {style: {margin: 0, color: 'var(--muted)', fontSize: '14px'}}, 'The selfie is only compared on this device. It is not added to the album.'),
@@ -649,7 +657,7 @@ const SHAPES = {tall: [720, 1280, '9:16'], square: [960, 960, '1:1'], wide: [128
 const Reel = {
   opts: {who: 'all', len: 30, music: 'golden', title: '', captions: true, shape: 'tall'},
   tl: null, img: new Map(), buf: null, own: null, ownName: '', key: '', ac: null, src: null, raf: 0, playing: false, rec: null, out: null,
-  pool(){ const w = this.opts.who; return [...S.photos].filter(p => w === 'all' || photoPeople(p).has(w)).sort((a, b) => (a.takenAt || a.at) - (b.takenAt || b.at)); },
+  pool(){ const w = this.opts.who; return [...S.photos].filter(p => w === 'all' || (w === 'sel' ? matchPeople(p) : photoPeople(p).has(w))).sort((a, b) => (a.takenAt || a.at) - (b.takenAt || b.at)); },
   pick(pool, n){
     if (pool.length <= n) return pool;
     const maxS = Math.max(1, ...pool.map(p => p.sharp || 0)), score = p => (p.sharp || 0) / maxS + Math.min(photoPeople(p).size, 4) * .15, out = [];
@@ -784,7 +792,8 @@ const Reel = {
 };
 function viewReel(){
   const o = Reel.opts, ppl = peopleList().filter(e => e.count), me = myPerson();
-  if (o.who !== 'all' && !ppl.some(e => e.id === o.who)) o.who = 'all';
+  const group = S.filter.people.length > 0 && (S.filter.people.length > 1 || S.filter.only);
+  if (o.who === 'sel' ? !group : o.who !== 'all' && !ppl.some(e => e.id === o.who)) o.who = 'all';
   const seg = (key, choices) => h('div', {class: 'seg', role: 'group'}, choices.map(([v, label]) => h('button', {type: 'button', 'aria-pressed': String(o[key] === v), onclick: e => { o[key] = v; e.currentTarget.parentNode.querySelectorAll('button').forEach(b => b.setAttribute('aria-pressed', String(b === e.currentTarget))); if (key === 'shape') sizeCanvas(); }}, label)));
   const [W, H] = SHAPES[o.shape];
   const sizeCanvas = () => { if (Reel.playing) return; const cv = $('#reel-canvas'), [w, hh] = SHAPES[o.shape]; cv.width = w; cv.height = hh; poster(); };
@@ -802,7 +811,7 @@ function viewReel(){
     h('div', {class: 'opts'},
       h('div', {class: 'field'}, h('label', {for: 'reel-title'}, 'Title'), h('input', {id: 'reel-title', value: o.title || S.trip.name, maxlength: 48, oninput: e => { o.title = e.target.value; }, onchange: poster})),
       h('div', {class: 'field'}, h('label', {for: 'reel-who'}, 'Starring'), h('select', {id: 'reel-who', onchange: e => { o.who = e.target.value; poster(); }},
-        h('option', {value: 'all'}, 'Everyone'), ppl.map(e => h('option', {value: e.id, selected: o.who === e.id || null}, (e.id === me ? 'Me' : personLabel(e)) + ` (${e.count})`)))),
+        h('option', {value: 'all'}, 'Everyone'), group && h('option', {value: 'sel', selected: o.who === 'sel' || null}, 'Photos with ' + pickedLabel()), ppl.map(e => h('option', {value: e.id, selected: o.who === e.id || null}, (e.id === me ? 'Me' : personLabel(e)) + ` (${e.count})`)))),
       h('div', {class: 'field'}, h('label', null, 'Length'), seg('len', [[15, '15 s'], [30, '30 s'], [45, '45 s'], [60, '60 s']])),
       h('div', {class: 'field'}, h('label', null, 'Shape'), seg('shape', [['tall', 'Tall 9:16'], ['square', 'Square'], ['wide', 'Wide 16:9']])),
       h('div', {class: 'field'}, h('label', null, 'Music'), seg('music', [...Object.entries(MUSIC).map(([k, m]) => [k, m.label]), ...(Reel.own ? [['own', Reel.ownName.slice(0, 18)]] : []), ['none', 'No music']]),

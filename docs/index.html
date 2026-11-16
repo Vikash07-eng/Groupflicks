@@ -98,6 +98,8 @@ h1,h2,h3{font-family:var(--display);text-wrap:balance;margin:0;line-height:1.02;
 .chip{display:inline-flex;align-items:center;gap:8px;border:1.5px solid var(--line);background:var(--surface);border-radius:999px;padding:5px 12px 5px 5px;cursor:pointer;white-space:nowrap;font-weight:500;flex:none}
 .chip.plain{padding-left:12px}
 .chip[aria-pressed="true"]{border-color:var(--grease);box-shadow:inset 0 0 0 1.5px var(--grease)}
+.chip.only{border-style:dashed}
+.chip.only[aria-pressed="true"]{background:var(--grease);color:var(--on-grease);border-style:solid}
 .av{width:30px;height:30px;border-radius:50%;background:var(--film) no-repeat;color:var(--film-ink);display:grid;place-items:center;font:500 11px var(--mono);flex:none;overflow:hidden}
 .tools{display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap;margin-bottom:12px}
 .tools .count{color:var(--muted)}
