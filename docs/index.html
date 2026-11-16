@@ -148,6 +148,10 @@ dialog::backdrop{background:rgba(5,6,7,.72)}
 .viewer img{display:block;max-height:60vh;width:auto;max-width:100%}
 .viewer .box{position:absolute;border:2px solid var(--edge);border-radius:4px;pointer-events:none}
 .pick-list{display:flex;gap:8px;flex-wrap:wrap}
+.faces{display:grid;grid-template-columns:repeat(auto-fill,minmax(76px,1fr));gap:10px;max-height:42vh;overflow:auto;padding:4px}
+.face{background:none;border:3px solid transparent;border-radius:50%;padding:2px;cursor:pointer;display:grid;place-items:center}
+.face .av{width:68px;height:68px}
+.face[aria-pressed="true"]{border-color:var(--grease)}
 ol.steps{margin:0;padding-left:20px;display:grid;gap:8px}
 .toast{position:fixed;left:50%;bottom:86px;transform:translateX(-50%);background:var(--ink);color:var(--bg);padding:10px 16px;border-radius:999px;font-weight:500;z-index:50;max-width:calc(100vw - 32px);text-align:center}
 .busy{font-family:var(--mono);font-size:12px;color:var(--muted);letter-spacing:.04em;text-transform:uppercase}

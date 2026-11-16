@@ -530,7 +530,7 @@ function renderDock(){
 }
 function viewPeople(){
   const ppl = peopleList(), me = myPerson();
-  const intro = Face.state === 'ready' ? 'Faces are grouped automatically as photos come in. Name a group once and the name sticks. If the same person shows up as two groups, open one and combine it with the other.'
+  const intro = Face.state === 'ready' ? 'Faces are grouped automatically as photos come in. Name a group once and the name sticks. If the same person shows up as two groups, open one and combine it with the other. If one group mixes two people, open it and use Separate faces.'
     : Face.state === 'loading' ? 'Loading face grouping…'
     : 'Automatic face grouping could not load on this device, so people are tagged by hand: open a photo, or pick several, and tag who is in them. Filters, downloads and the reel work from those tags.';
   return h('div', null,
@@ -642,6 +642,38 @@ function groupFace(id){
   for (const p of S.photos) for (const f of p.faces || []) if (f.p === id && f.b[2] * f.b[3] > area){ area = f.b[2] * f.b[3]; best = {thumb: p.thumb, b: f.b, r: p.h / p.w}; }
   return {name: S.people[id]?.name || '', cover: best};
 }
+/* every detected face currently counted as this person */
+function facesOf(id){ const out = []; for (const p of S.photos) (p.faces || []).forEach((f, i) => { if (f.p && root(f.p) === id) out.push({p, i, f}); }); return out; }
+async function moveFaces(faces, to){
+  const byPhoto = new Map(); for (const x of faces){ if (!byPhoto.has(x.p.id)) byPhoto.set(x.p.id, {p: x.p, idx: new Set()}); byPhoto.get(x.p.id).idx.add(x.i); }
+  for (const {p, idx} of byPhoto.values()) await store.patchPhoto(S.tripId, p.id, {faces: p.faces.map((f, i) => idx.has(i) ? {...f, p: to} : f)});
+}
+function separateDialog(e){
+  const faces = facesOf(e.id), picked = new Set(), others = peopleList().filter(o => o.id !== e.id);
+  const count = h('strong', null, 'Tap the faces that are someone else'), actions = h('div', {style: {display: 'grid', gap: '12px'}});
+  const run = async getTarget => {
+    actions.querySelectorAll('button,input').forEach(b => b.disabled = true);
+    try { const to = await getTarget(), n = picked.size; await moveFaces(faces.filter((_, i) => picked.has(i)), to); closeDlg(); toast(`Moved ${plural(n, 'face')}.`); }
+    catch (err){ closeDlg(); toast("Couldn't move them. Check your connection and try again."); }
+  };
+  const refresh = () => {
+    count.textContent = picked.size ? `${plural(picked.size, 'face')} picked` : 'Tap the faces that are someone else';
+    actions.replaceChildren(...(picked.size ? [
+      h('form', {class: 'row', onsubmit: ev => { ev.preventDefault(); const name = $('#sep-name').value.trim(); run(() => newPerson(name)); }},
+        h('div', {class: 'field'}, h('label', {for: 'sep-name'}, 'They are a new person'), h('input', {id: 'sep-name', placeholder: 'Name (optional)', maxlength: 40})),
+        h('button', {class: 'btn primary', type: 'submit'}, 'Move to a new person')),
+      others.length > 0 && h('div', null, h('p', {style: {margin: '0 0 8px', color: 'var(--muted)', fontSize: '14px'}}, 'Or they are someone already in the album:'),
+        h('div', {class: 'pick-list'}, others.map(o => h('button', {class: 'chip', type: 'button', onclick: () => run(async () => o.id)}, avatar(o), personLabel(o)))))
+    ].filter(Boolean) : []));
+  };
+  openDlg(h('h2', null, 'Separate ' + (e.name || 'this group')),
+    h('p', {style: {margin: 0, color: 'var(--muted)'}}, 'These are all the faces counted as this person. Pick the ones that belong to someone else and move them.'),
+    h('div', {class: 'faces'}, faces.map((x, i) => h('button', {class: 'face', type: 'button', 'aria-pressed': 'false', 'aria-label': 'Face ' + (i + 1), onclick: ev => {
+      picked.has(i) ? picked.delete(i) : picked.add(i); ev.currentTarget.setAttribute('aria-pressed', String(picked.has(i))); refresh(); }},
+      avatar({cover: {thumb: x.p.thumb, b: x.f.b, r: x.p.h / x.p.w}})))),
+    count, actions);
+  refresh();
+}
 function personDialog(e){
   const isNew = !e, me = myPerson(), others = isNew ? [] : peopleList().filter(o => o.id !== e.id), parts = isNew ? [] : mergedInto(e.id);
   const save = async ev => {
@@ -671,7 +703,8 @@ function personDialog(e){
         h('button', {class: 'btn small quiet', type: 'button', onclick: async () => { try { await store.putPerson(S.tripId, id, {mergedInto: null}); toast('Split back out.'); } catch (err){ toast("Couldn't split it. Check your connection."); } closeDlg(); }}, 'Split'))))),
     !isNew && h('div', {class: 'row'},
       h('button', {class: 'btn', type: 'button', onclick: () => { S.filter.people = [e.id]; S.filter.only = false; S.tab = 'photos'; closeDlg(); render(); }}, 'Show their photos'),
-      e.id !== me && S.me.id !== 'anon' && h('button', {class: 'btn', type: 'button', onclick: async () => { await setMe(e.id); closeDlg(); }}, 'This is me')));
+      e.id !== me && S.me.id !== 'anon' && h('button', {class: 'btn', type: 'button', onclick: async () => { await setMe(e.id); closeDlg(); }}, 'This is me'),
+      S.canWrite && facesOf(e.id).length > 1 && h('button', {class: 'btn', type: 'button', onclick: () => separateDialog(e)}, 'Separate faces')));
 }
 async function setMe(pid){ try { await store.putMember(S.tripId, {me: pid}); toast("Got it. Use the Me filter to see your photos."); } catch (e){ S.members[S.me.id] = {...S.members[S.me.id], me: pid}; changed(); } }
 function findMeDialog(){
