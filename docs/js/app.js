@@ -72,7 +72,11 @@ class Remote {
   constructor(url, key){ this.url = url.replace(/\/+$/, ''); this.h = {apikey: key, Authorization: 'Bearer ' + key}; }
   async rpc(fn, args){
     const r = await fetch(`${this.url}/rest/v1/rpc/${fn}`, {method: 'POST', headers: {...this.h, 'Content-Type': 'application/json'}, body: JSON.stringify(args)});
-    if (!r.ok) throw Object.assign(new Error('rpc ' + r.status), {status: r.status});
+    if (!r.ok){
+      // the database reports a wrong or unknown link as code P0002, which arrives as a server error
+      let code = ''; try { code = (await r.json()).code || ''; } catch (e){}
+      throw Object.assign(new Error('rpc ' + r.status), {status: code === 'P0002' ? 404 : r.status});
+    }
     const t = await r.text(); return t ? JSON.parse(t) : null;
   }
   createAlbum(a, t){ return this.rpc('gf_create_album', {p_album: a, p_token: t}); }
