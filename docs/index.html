@@ -153,6 +153,11 @@ dialog::backdrop{background:rgba(5,6,7,.72)}
 .face .av{width:68px;height:68px}
 .face[aria-pressed="true"]{border-color:var(--grease)}
 ol.steps{margin:0;padding-left:20px;display:grid;gap:8px}
+#tray{position:fixed;right:16px;bottom:88px;z-index:20;width:min(360px,calc(100vw - 32px))}
+.tray{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:14px;display:grid;gap:8px;box-shadow:0 10px 30px rgba(0,0,0,.25)}
+.tray .prog{background:var(--line)}.tray .prog i{background:var(--grease);transition:width .2s}
+.tray-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tray-list{margin:0;padding-left:18px;font-size:14px;display:grid;gap:4px;max-height:30vh;overflow:auto}
 .toast{position:fixed;left:50%;bottom:86px;transform:translateX(-50%);background:var(--ink);color:var(--bg);padding:10px 16px;border-radius:999px;font-weight:500;z-index:50;max-width:calc(100vw - 32px);text-align:center}
 .busy{font-family:var(--mono);font-size:12px;color:var(--muted);letter-spacing:.04em;text-transform:uppercase}
 @media (max-width:760px){
@@ -173,8 +178,9 @@ ol.steps{margin:0;padding-left:20px;display:grid;gap:8px}
   <main id="main"></main>
 </div>
 <div id="dock"></div>
+<div id="tray"></div>
 <dialog id="dlg"></dialog>
-<input type="file" id="file-photos" accept="image/*" multiple hidden>
+<input type="file" id="file-photos" accept="image/*,.heic,.heif" multiple hidden>
 <input type="file" id="file-selfie" accept="image/*" capture="user" hidden>
 <input type="file" id="file-audio" accept="audio/*" hidden>
 <script src="config.js"></script>

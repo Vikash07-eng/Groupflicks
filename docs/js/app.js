@@ -210,8 +210,8 @@ const store = {
   },
   async urlOf(id){ const urls = A.urls; if (!urls.has(id)){ const b = await this.blob(id); if (!urls.has(id)) urls.set(id, URL.createObjectURL(b)); } return urls.get(id); },
   async upload(blob){
-    const id = randId(16);
-    await BE.upload(A.id, id, await seal(A.key, new Uint8Array(await blob.arrayBuffer()), aad(id)));
+    const id = randId(16), album = A.id, sealed = await seal(A.key, new Uint8Array(await blob.arrayBuffer()), aad(id));
+    await retry(() => BE.upload(album, id, sealed));
     A.blobs.set(id, Promise.resolve(blob)); A.urls.set(id, URL.createObjectURL(blob)); return id;
   },
   putPhoto: (_, pid, data) => putDoc(pid, 'photo', data),
@@ -228,6 +228,13 @@ const store = {
 function lazy(el, id, bg){
   const set = u => { if (bg) el.style.backgroundImage = `url("${u}")`; else el.src = u; };
   const u = store.url(id); if (u) set(u); else store.urlOf(id).then(set).catch(() => {});
+}
+/* try again after a dropped connection or a busy server; give up at once on a refusal */
+async function retry(fn, tries = 3){
+  for (let i = 0; ; i++){
+    try { return await fn(); }
+    catch (e){ if (i >= tries - 1 || (e.status >= 400 && e.status < 500 && e.status !== 408 && e.status !== 429)) throw e; await new Promise(r => setTimeout(r, 700 * 2 ** i)); }
+  }
 }
 const loadScript = src => new Promise((res, rej) => { const s = document.createElement('script'); s.src = src; s.onload = res; s.onerror = rej; document.head.append(s); });
 
@@ -358,27 +365,67 @@ async function addImage(source, takenAt){
   const [fb, tb] = await Promise.all([toBlob(full, .88), toBlob(thumb, .8)]);
   const data = {full: await store.upload(fb), thumb: await store.upload(tb), w: full.width, h: full.height, takenAt, at: Date.now(), by: S.me.id, sharp: sharpness(thumb)};
   if (Face.state === 'ready'){ try { data.faces = Face.assign(await Face.detect(fit(full, 1600))); } catch (e){} }
-  const id = rid(9); Face.busy.add(id);
-  await store.putPhoto(S.tripId, id, data);
+  const id = rid(9), tid = S.tripId; Face.busy.add(id);
+  await retry(() => store.putPhoto(tid, id, data));
 }
-async function addFiles(files){
-  files = [...files].filter(f => f.type.startsWith('image/') || /\.(jpe?g|png|webp|heic)$/i.test(f.name));
-  if (!files.length) return;
-  let ok = 0; const failed = [];
-  for (let i = 0; i < files.length; i++){
-    setWork(`Adding ${i + 1} of ${files.length}…`);
-    try {
-      const f = files[i];
-      let src; try { src = await createImageBitmap(f, {imageOrientation: 'from-image'}); } catch (e){ const u = URL.createObjectURL(f); src = await loadImg(u); }
-      await addImage(src, (await exifDate(f)) || f.lastModified || Date.now()); ok++;
-    } catch (e){
-      failed.push(files[i].name);
-      if (e?.code === 'quota_or_state' || e?.code === 'quota_exceeded'){ toast('This album is out of storage. Remove some photos to add more.'); break; }
-    }
+/* iPhone photos are often HEIC, which most browsers other than Safari cannot open.
+   The converter is only fetched when a photo actually needs it. */
+const HEIC_LIB = 'https://cdn.jsdelivr.net/npm/heic-to@1.6.5/dist/csp/heic-to.js';
+let heicLib = null;
+async function looksHeic(f){
+  if (/hei[cf]/i.test(f.type) || /\.hei[cf]$/i.test(f.name)) return true;
+  try { const b = new Uint8Array(await f.slice(0, 16).arrayBuffer()); return /^ftyp(heic|heix|hevc|hevx|heim|heis|mif1|msf1)/.test(String.fromCharCode(...b.subarray(4, 12))); } catch (e){ return false; }
+}
+const fail = (why, e) => Object.assign(e || new Error(why), {why});
+async function decodeImage(f){
+  try { return await createImageBitmap(f, {imageOrientation: 'from-image'}); } catch (e){}
+  const u = URL.createObjectURL(f);
+  try { return await loadImg(u); } catch (e){} finally { setTimeout(() => URL.revokeObjectURL(u), 30000); }
+  if (await looksHeic(f)){
+    let lib; try { lib = await (heicLib ||= import(HEIC_LIB)); } catch (e){ heicLib = null; throw fail("This is an iPhone HEIC photo and the converter couldn't load. Check your connection and try again."); }
+    try { return await createImageBitmap(await lib.heicTo({blob: f, type: 'image/jpeg', quality: .95})); } catch (e){ throw fail("This HEIC photo couldn't be converted."); }
   }
-  setWork('');
-  toast(failed.length ? `Added ${ok}. Couldn't read ${failed.length} (${failed.slice(0, 2).join(', ')}${failed.length > 2 ? '…' : ''}). Try JPEG or PNG.` : `Added ${plural(ok, 'photo')}.`);
+  throw fail("This browser can't read this file. Use a JPEG, PNG, WebP or HEIC photo.");
 }
+/* uploads run one at a time through a queue, with a tray that shows progress and anything that failed */
+const Up = {queue: [], total: 0, done: 0, failed: [], running: false, current: '', album: null};
+function addFiles(files){
+  files = [...files].filter(f => f.type.startsWith('image/') || /\.(jpe?g|png|webp|gif|avif|hei[cf])$/i.test(f.name));
+  if (!files.length){ toast("Those files aren't photos."); return; }
+  if (!Up.running){ Up.total = 0; Up.done = 0; Up.failed = []; }
+  Up.queue.push(...files); Up.total += files.length; Up.album = A.id;
+  if (Up.running) renderTray(); else runUploads();
+}
+async function runUploads(){
+  Up.running = true; const album = Up.album;
+  while (Up.queue.length){
+    const f = Up.queue.shift(); Up.current = f.name; renderTray();
+    try {
+      if (A.id !== album) throw fail('The album was closed before this photo was added.');
+      const src = await decodeImage(f);
+      await addImage(src, (await exifDate(f)) || f.lastModified || Date.now()); src.close?.();
+    } catch (e){
+      Up.failed.push({file: f, why: e.why || (e.status === 413 ? 'The file is too large for the album.' : e.status >= 400 && e.status < 500 ? "The album didn't accept it. It may be full or deleted." : 'The upload failed. Check your connection.')});
+    }
+    Up.done++; renderTray();
+  }
+  Up.running = false; Up.current = ''; renderTray();
+  if (!Up.failed.length){ toast(`Added ${plural(Up.total, 'photo')}.`); setTimeout(() => { if (!Up.running && !Up.failed.length) $('#tray').replaceChildren(); }, 2200); }
+}
+function renderTray(){
+  const tray = $('#tray'), ok = Up.done - Up.failed.length, pct = Up.total ? Math.round(Up.done / Up.total * 100) : 0;
+  if (!Up.running && !Up.failed.length && !Up.total){ tray.replaceChildren(); return; }
+  tray.replaceChildren(h('div', {class: 'tray', role: 'status'},
+    h('strong', null, Up.running ? `Adding photo ${Math.min(Up.done + 1, Up.total)} of ${Up.total}` : Up.failed.length ? `Added ${ok} of ${Up.total}. ${plural(Up.failed.length, 'photo')} didn't go through` : `Added ${plural(Up.total, 'photo')}`),
+    h('div', {class: 'prog'}, h('i', {style: {width: pct + '%'}})),
+    Up.running && h('span', {class: 'busy tray-name'}, Up.current),
+    Up.running && h('span', {style: {color: 'var(--muted)', fontSize: '13px'}}, 'Keep this page open until it finishes.'),
+    !Up.running && Up.failed.length > 0 && h('ul', {class: 'tray-list'}, Up.failed.slice(0, 5).map(x => h('li', null, h('b', null, x.file.name), ' ', x.why)), Up.failed.length > 5 && h('li', null, `and ${Up.failed.length - 5} more`)),
+    !Up.running && Up.failed.length > 0 && h('div', {class: 'row'},
+      h('button', {class: 'btn small primary', type: 'button', onclick: () => { const again = Up.failed.map(x => x.file); Up.total = 0; Up.done = 0; Up.failed = []; addFiles(again); }}, 'Try again'),
+      h('button', {class: 'btn small quiet', type: 'button', onclick: () => { Up.total = 0; Up.done = 0; Up.failed = []; tray.replaceChildren(); }}, 'Dismiss'))));
+}
+addEventListener('beforeunload', e => { if (Up.running){ e.preventDefault(); e.returnValue = ''; } });
 function setWork(msg){ S.work = msg; const el = $('#work'); if (el) el.textContent = msg; }
 
 /* sample trip: drawn scenery, clearly labelled, so the album and reel can be tried without real photos */
