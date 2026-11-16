@@ -520,6 +520,7 @@ function renderDock(){
       h('div', {class: 'row'},
         h('button', {class: 'btn small quiet', type: 'button', onclick: () => { list.forEach(p => S.sel.add(p.id)); render(); }}, 'Circle all'),
         S.canWrite && h('button', {class: 'btn small', type: 'button', disabled: !picked.length, onclick: () => tagDialog(picked)}, "Tag who's in these"),
+        S.canWrite && h('button', {class: 'btn small', type: 'button', disabled: !picked.length, onclick: () => removeDialog(picked)}, 'Remove'),
         h('button', {class: 'btn small primary', type: 'button', disabled: !picked.length, onclick: () => downloadPhotos(picked)}, 'Download ' + picked.length)))));
   } else if (S.filter.people.length || S.filter.by){
     dock.replaceChildren(h('div', {class: 'dock'}, h('div', null,
@@ -597,6 +598,21 @@ function tagDialog(list){
     h('form', {class: 'row', onsubmit: async e => { e.preventDefault(); const n = $('#new-person').value.trim(); if (n) done(await newPerson(n)); }},
       h('div', {class: 'field'}, h('label', {for: 'new-person'}, 'Someone new'), h('input', {id: 'new-person', placeholder: 'Name', maxlength: 40})), h('button', {class: 'btn', type: 'submit'}, 'Add and tag')));
 }
+const canRemove = p => p.by === S.me.id || S.isOwner;
+function removeDialog(picked){
+  const mine = picked.filter(canRemove), skip = picked.length - mine.length, status = h('span', {class: 'busy'});
+  const go = h('button', {class: 'btn primary', type: 'button', onclick: async e => {
+    e.currentTarget.disabled = true; let done = 0, failed = 0;
+    for (const p of mine){ status.textContent = `Removing ${++done} of ${mine.length}…`; try { await store.delPhoto(S.tripId, p); S.sel.delete(p.id); } catch (err){ failed++; } }
+    closeDlg(); if (!failed){ S.selecting = false; S.sel.clear(); } render();
+    toast(failed ? `Removed ${mine.length - failed}. ${plural(failed, 'photo')} couldn't be removed; check your connection and try again.` : `Removed ${plural(mine.length, 'photo')}.`);
+  }}, `Remove ${plural(mine.length, 'photo')} for everyone`);
+  openDlg(h('h2', null, mine.length ? `Remove ${plural(mine.length, 'photo')}?` : "These aren't yours to remove"),
+    mine.length ? h('p', {style: {margin: 0}}, 'They are deleted from the album for everyone and cannot be brought back. Anyone who already downloaded them keeps their copy.')
+                : h('p', {style: {margin: 0}}, 'You can remove photos you added. The person who created the album can remove any photo.'),
+    mine.length > 0 && skip > 0 && h('p', {class: 'note'}, `${plural(skip, 'circled photo')} ${skip === 1 ? 'was' : 'were'} added by someone else and will stay.`),
+    mine.length > 0 && h('div', {class: 'row'}, go, h('button', {class: 'btn quiet', type: 'button', onclick: closeDlg}, 'Keep them'), status));
+}
 function photoDialog(p){
   const img = lazyImg(p.full, 'Photo by ' + nameOf(p.by));
   const view = h('div', {class: 'viewer'}, img, (p.faces || []).map(f => h('span', {class: 'box', style: {left: f.b[0] * 100 + '%', top: f.b[1] * 100 + '%', width: f.b[2] * 100 + '%', height: f.b[3] * 100 + '%'}})));
@@ -610,7 +626,7 @@ function photoDialog(p){
     h('div', {class: 'row'},
       S.canWrite && h('button', {class: 'btn', type: 'button', onclick: () => tagDialog([p])}, 'Tag someone'),
       h('button', {class: 'btn primary', type: 'button', onclick: () => downloadPhotos([p])}, 'Download'),
-      S.canWrite && (p.by === S.me.id || S.isOwner) && h('button', {class: 'btn quiet', type: 'button', onclick: e => {
+      S.canWrite && canRemove(p) && h('button', {class: 'btn quiet', type: 'button', onclick: e => {
         if (e.currentTarget.dataset.sure){ closeDlg(); store.delPhoto(S.tripId, p).catch(() => toast("Couldn't remove it.")); }
         else { e.currentTarget.dataset.sure = 1; e.currentTarget.textContent = 'Tap again to remove for everyone'; } }}, 'Remove')));
 }
