@@ -134,12 +134,28 @@ create policy "gf upload into an existing album" on storage.objects
   for insert to anon, authenticated
   with check (bucket_id = 'gf-photos' and public.gf_album_exists((storage.foldername(name))[1]));
 
+-- Nobody can list the bucket. Reading a row is allowed only while the Storage API is carrying out
+-- a delete, which needs to find and lock the row first. A delete therefore needs the album id and
+-- the random file name, and both are known only to people who hold the invite link.
 drop policy if exists "gf read within an existing album" on storage.objects;
-create policy "gf read within an existing album" on storage.objects
+drop policy if exists "gf find a file while deleting it" on storage.objects;
+create policy "gf find a file while deleting it" on storage.objects
   for select to anon, authenticated
-  using (bucket_id = 'gf-photos' and public.gf_album_exists((storage.foldername(name))[1]));
+  using (bucket_id = 'gf-photos'
+         and coalesce(current_setting('storage.operation', true), '') ilike '%delete%'
+         and public.gf_album_exists((storage.foldername(name))[1]));
+
+drop policy if exists "gf lock a file while deleting it" on storage.objects;
+create policy "gf lock a file while deleting it" on storage.objects
+  for update to anon, authenticated
+  using (bucket_id = 'gf-photos'
+         and coalesce(current_setting('storage.operation', true), '') ilike '%delete%'
+         and public.gf_album_exists((storage.foldername(name))[1]))
+  with check (false);
 
 drop policy if exists "gf delete within an existing album" on storage.objects;
 create policy "gf delete within an existing album" on storage.objects
   for delete to anon, authenticated
-  using (bucket_id = 'gf-photos' and public.gf_album_exists((storage.foldername(name))[1]));
+  using (bucket_id = 'gf-photos'
+         and coalesce(current_setting('storage.operation', true), '') ilike '%delete%'
+         and public.gf_album_exists((storage.foldername(name))[1]));

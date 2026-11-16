@@ -45,6 +45,7 @@ To run it locally, serve `docs/` on localhost: `python3 -m http.server 8000 --di
 - Other devices pick up changes by checking every five seconds.
 - Photos stay until someone removes them. The person who created an album can delete the whole album, with its files, from Album options, in the browser they created it in.
 - Photos are resized to 2048 px before upload, so downloads are not the originals.
+- The photo bucket cannot be listed. Adding or deleting a file needs the album id and the file's random name, which only people with the invite link have. If you set the project up before 16 November 2026, run `supabase/2026-11-16-lock-down-storage.sql` once.
 - Nothing limits how many albums or uploads a visitor can create. Add rate limits before sharing the site widely.
 - The face-api script is loaded from a CDN without an integrity hash. Vendoring it into `docs/vendor/` would remove that trust.
 

@@ -88,7 +88,7 @@ class Remote {
     if (!r.ok) throw Object.assign(new Error('upload ' + r.status), {status: r.status});
   }
   async download(a, bid){ const r = await fetch(`${this.url}/storage/v1/object/public/gf-photos/${a}/${bid}`); if (!r.ok) throw new Error('download ' + r.status); return r.arrayBuffer(); }
-  async remove(a, bid){ try { await fetch(`${this.url}/storage/v1/object/gf-photos/${a}/${bid}`, {method: 'DELETE', headers: this.h}); } catch (e){} }
+  async remove(a, bid){ try { return (await fetch(`${this.url}/storage/v1/object/gf-photos/${a}/${bid}`, {method: 'DELETE', headers: this.h})).ok; } catch (e){ return false; } }
   deleteAlbum(a, t){ return this.rpc('gf_delete_album', {p_album: a, p_token: t}); }
 }
 class Memory {
@@ -100,7 +100,7 @@ class Memory {
   async list(a, t, since){ return [...this.need(a, t).docs.values()].filter(d => d.seq > since).sort((x, y) => x.seq - y.seq); }
   async upload(a, bid, bytes){ this.blobs.set(a + '/' + bid, bytes); }
   async download(a, bid){ const b = this.blobs.get(a + '/' + bid); if (!b) throw new Error('missing'); return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength); }
-  async remove(a, bid){ this.blobs.delete(a + '/' + bid); }
+  async remove(a, bid){ return this.blobs.delete(a + '/' + bid); }
   async deleteAlbum(a, t){ this.need(a, t); this.albums.delete(a); }
 }
 const BE = S.cloud ? new Remote(CFG.supabaseUrl, CFG.supabaseAnonKey) : new Memory();
@@ -171,7 +171,9 @@ async function openTrip(id, secret){
 async function deleteAlbum(onStep){
   const id = A.id, token = A.token, docs = [...A.docs.keys()], files = S.photos.flatMap(p => [p.full, p.thumb]).filter(Boolean);
   clearInterval(A.timer);
-  for (let i = 0; i < files.length; i += 6){ onStep(`Deleting file ${Math.min(i + 6, files.length)} of ${files.length}…`); await Promise.all(files.slice(i, i + 6).map(f => BE.remove(id, f))); }
+  let left = 0;
+  for (let i = 0; i < files.length; i += 6){ onStep(`Deleting file ${Math.min(i + 6, files.length)} of ${files.length}…`); left += (await Promise.all(files.slice(i, i + 6).map(f => BE.remove(id, f)))).filter(ok => !ok).length; }
+  if (left) console.warn(`Groupflicks: ${left} encrypted files could not be erased from storage.`);
   onStep('Removing the album…');
   try { await BE.deleteAlbum(id, token); }
   catch (e){ // a database set up before album deletion existed: blank every record instead
@@ -214,7 +216,11 @@ const store = {
   },
   putPhoto: (_, pid, data) => putDoc(pid, 'photo', data),
   patchPhoto: (_, pid, patch) => putDoc(pid, 'photo', {...A.docs.get(pid)?.v, ...patch}),
-  async delPhoto(_, p){ A.docs.delete(p.id); syncState(); await BE.del(A.id, A.token, p.id); BE.remove(A.id, p.full); BE.remove(A.id, p.thumb); },
+  async delPhoto(_, p){
+    A.docs.delete(p.id); syncState(); await BE.del(A.id, A.token, p.id);
+    const ok = await Promise.all([BE.remove(A.id, p.full), BE.remove(A.id, p.thumb)]);
+    if (ok.includes(false)) console.warn('Groupflicks: a deleted photo is gone from the album, but its encrypted file could not be erased from storage.');
+  },
   putPerson: (_, pid, patch) => putDoc(pid, 'person', {...(S.people[pid] || {}), ...patch}),
   putMember: (_, patch) => putDoc('m_' + S.me.id, 'member', {...(S.members[S.me.id] || {}), ...patch})
 };
