@@ -159,6 +159,7 @@ async function putDoc(id, kind, v){
 }
 function closeTrip(){
   clearInterval(A.timer); for (const u of A.urls.values()) URL.revokeObjectURL(u);
+  if (typeof Reel !== 'undefined'){ Reel.resetEdits(); Reel.match = null; Reel.tl = null; Reel.img.clear(); }
   Object.assign(A, {id: null, secret: null, key: null, token: null, read: null, vk: null, view: false, readSet: false, seq: 0, docs: new Map(), blobs: new Map(), urls: new Map(), polls: 0});
   Object.assign(S, {tripId: null, trip: null, photos: [], people: {}, members: {}, tripLoaded: false, slow: false, gone: false, canWrite: true, canUpload: true});
 }
@@ -923,16 +924,62 @@ async function renderMusic(style, dur, bars){
   }
   return C.startRendering();
 }
+/* Reads a reference video on this device and measures how it was edited: where the cuts fall,
+   how long it runs, its shape and its overall colour. Nothing is uploaded. */
+async function analyzeVideo(file, onStep){
+  const url = URL.createObjectURL(file), v = document.createElement('video'); v.muted = true; v.playsInline = true; v.preload = 'auto'; v.src = url;
+  try {
+    await new Promise((res, rej) => { v.onloadedmetadata = res; v.onerror = () => rej(new Error('video')); setTimeout(() => rej(new Error('video')), 15000); });
+    const dur = Math.min(v.duration, 120); if (!isFinite(dur) || dur < 1 || !v.videoWidth) throw new Error('video');
+    const W = 48, H = clamp(Math.round(48 * v.videoHeight / v.videoWidth), 16, 120), cv = h('canvas', {width: W, height: H}), c = cv.getContext('2d', {willReadFrequently: true});
+    const step = dur > 60 ? .2 : dur > 25 ? .1 : .05, BX = 6, BY = Math.max(3, Math.round(6 * H / W)), seek = t => new Promise(res => { let done = false; const ok = () => { if (!done){ done = true; res(); } }; v.onseeked = ok; setTimeout(ok, 2000); v.currentTime = t; });
+    const diffs = []; let prev = null, R = 0, G = 0, B = 0, SAT = 0, n = 0;
+    for (let t = 0; t < dur; t += step){
+      await seek(Math.min(t, dur - .01)); c.drawImage(v, 0, 0, W, H);
+      const d = c.getImageData(0, 0, W, H).data, cur = new Float32Array(BX * BY * 3), cnt = new Float32Array(BX * BY); let diff = 0;
+      for (let y = 0, i = 0; y < H; y++) for (let x = 0; x < W; x++, i += 4){
+        const k = Math.min(BY - 1, Math.floor(y * BY / H)) * BX + Math.min(BX - 1, Math.floor(x * BX / W)); cur[k * 3] += d[i]; cur[k * 3 + 1] += d[i + 1]; cur[k * 3 + 2] += d[i + 2]; cnt[k]++;
+        const mx = Math.max(d[i], d[i + 1], d[i + 2]), mn = Math.min(d[i], d[i + 1], d[i + 2]); R += d[i]; G += d[i + 1]; B += d[i + 2]; SAT += mx ? (mx - mn) / mx : 0; n++;
+      }
+      for (let k = 0; k < cnt.length; k++) for (let ch = 0; ch < 3; ch++){ cur[k * 3 + ch] /= cnt[k] || 1; if (prev) diff += Math.abs(cur[k * 3 + ch] - prev[k * 3 + ch]); }
+      diffs.push({t, d: prev ? diff / cur.length : 0}); prev = cur;
+      diffs.push({t, d: prev ? diff / (W * H * 3) : 0}); prev = cur;
+      if (diffs.length % 20 === 0) onStep?.(`Reading the video… ${Math.round(t / dur * 100)}%`);
+    }
+    // a cut is a jump that stands well above the movement around it
+    const cuts = [], win = Math.round(1 / step);
+    for (let i = 1; i < diffs.length; i++){
+      const near = diffs.slice(Math.max(1, i - win), i + win + 1).map(x => x.d).sort((a, b) => a - b), med = near[near.length >> 1], x = diffs[i].d;
+      const peak = x >= diffs[i - 1].d && x >= (diffs[i + 1]?.d ?? 0);
+      if (peak && x > Math.max(7, med * 3 + 5) && (!cuts.length || diffs[i].t - cuts[cuts.length - 1] >= .3)) cuts.push(diffs[i].t);
+    }
+    const edges = [0, ...cuts, dur], durs = []; for (let i = 1; i < edges.length; i++) durs.push(+(edges[i] - edges[i - 1]).toFixed(2));
+    const ratio = v.videoWidth / v.videoHeight;
+    let audio = null; try { const ac = Reel.ac ||= new (window.AudioContext || window.webkitAudioContext)(); audio = await ac.decodeAudioData(await file.arrayBuffer()); } catch (e){}
+    return {name: file.name, durs, total: dur, cuts: cuts.length, shape: ratio < .8 ? 'tall' : ratio > 1.25 ? 'wide' : 'square', look: {tint: [R / n, G / n, B / n].map(Math.round), sat: SAT / n, lum: (R + G + B) / (3 * n)}, audio};
+  } finally { v.removeAttribute('src'); v.load(); URL.revokeObjectURL(url); }
+}
 const SHAPES = {tall: [9, 16], square: [1, 1], wide: [16, 9]};
 const reelSize = o => { const s = o.quality === 'hd' ? 1080 : 720, [a, b] = SHAPES[o.shape]; return a < b ? [s, Math.round(s * b / a)] : a > b ? [Math.round(s * a / b), s] : [s, s]; };
 const Reel = {
   opts: {who: 'all', len: 30, music: 'golden', title: '', captions: true, shape: 'tall', look: 'film', quality: 'hd'},
   tl: null, img: new Map(), buf: null, own: null, ownName: '', key: '', ac: null, src: null, raf: 0, playing: false, rec: null, out: null, grain: null,
+  edit: {list: null}, match: null,
+  resetEdits(){ this.edit = {list: null}; this.key = ''; },
   pool(){ const w = this.opts.who; const hm = w === 'fav' ? heartMap() : null; return [...S.photos].filter(p => w === 'all' || (w === 'fav' ? hm.get(p.id) > 0 : w === 'sel' ? matchPeople(p) : photoPeople(p).has(w))).sort((a, b) => (a.takenAt || a.at) - (b.takenAt || b.at)); },
   pick(pool, n, score){
     if (pool.length <= n) return pool; const out = [];
     for (let i = 0; i < n; i++){ const a = Math.floor(i * pool.length / n), b = Math.floor((i + 1) * pool.length / n); out.push(pool.slice(a, b).sort((x, y) => score(y) - score(x))[0]); }
     return out;
+  },
+  /* once you edit the photo list by hand, the reel uses exactly your photos in your order */
+  choose(uniq, need, score){ return this.edit.list ? uniq.slice(0, need) : this.pick(uniq, need, score); },
+  /* a reference video sets the timing: one photo per shot, each held exactly as long as the original */
+  planMatch(pool, uniq, score, when, ts){
+    const durs = this.match.durs, picks = this.choose(uniq, Math.min(uniq.length, durs.length, 48), score), segs = []; let t = 0;
+    durs.forEach((d, i) => { segs.push({kind: i === 0 && d >= 1.2 ? 'title' : d < .7 ? 'flash' : 'shot', lay: 'single', ps: [picks[i % picks.length]], n: i + 1, t0: t, t1: t + d, i}); t += d; });
+    const sorted = [...durs].sort((a, b) => a - b), beat = clamp(sorted[sorted.length >> 1], .3, 1), bar = 4 * beat, bars = []; for (let b = 0; b * bar < t - 1e-6; b++) bars.push(b ? 'drop' : 'intro');
+    return {segs, total: t, beat, bar, bars, shots: durs.length, n: picks.length, picks, all: uniq, dropAt: -9, matched: true, range: fmtRange(Math.min(...ts), Math.max(...ts)), pool: pool.length, people: new Set(pool.map(p => p.by)).size};
   },
   /* the rhythm of the body: how many beats each shot holds and whether it is one photo or a collage */
   pattern(beats, level){
@@ -949,15 +996,18 @@ const Reel = {
     const ts = pool.map(when), d0 = new Date(Math.min(...ts)); d0.setHours(0, 0, 0, 0);
     const dayOf = p => Math.floor((new Date(when(p)).setHours(0, 0, 0, 0) - d0.getTime()) / 864e5) + 1;
     const maxS = Math.max(1, ...pool.map(p => p.sharp || 0)), hm = heartMap(), score = p => (p.sharp || 0) / maxS + Math.min(photoPeople(p).size, 4) * .15 + Math.min(hm.get(p.id) || 0, 5) * .2;
-    const uniq = []; // burst shots: keep the best of several taken seconds apart by the same person
+    let uniq = []; // burst shots: keep the best of several taken seconds apart by the same person
     for (const p of pool){ const q = uniq[uniq.length - 1]; if (q && q.by === p.by && Math.abs(when(p) - when(q)) < 3000){ if (score(p) > score(q)) uniq[uniq.length - 1] = p; } else uniq.push(p); }
+    if (this.edit.list) uniq = this.edit.list.map(id => pool.find(p => p.id === id)).filter(Boolean);
+    if (!uniq.length) throw new Error('empty');
+    if (this.match && this.match.durs.length >= 2) return this.planMatch(pool, uniq, score, when, ts);
     const cap = Math.min(uniq.length, 48), B = Math.max(4, Math.floor(o.len / bar)), tB = B >= 16 ? 2 : 1, oB = B >= 16 ? 2 : 1;
     let cards = o.captions ? Math.max(0, Math.min(new Set(uniq.map(dayOf)).size - 1, Math.floor(B / 5))) : 0;
     const bodyBeats = (B - tB - oB) * 4 - cards * 2;
     let slots = [], need = 0;
     for (let level = 0; level < 3; level++){ slots = this.pattern(bodyBeats, level); need = slots.reduce((n, s) => n + s.n, 0); if (need <= cap) break; }
     if (need > cap){ slots = slots.slice(0, cap); need = cap; }
-    const picks = this.pick(uniq, need, score), hero = [...picks].sort((a, b) => score(b) - score(a))[0] || uniq[0];
+    const picks = this.choose(uniq, need, score), hero = [...picks].sort((a, b) => score(b) - score(a))[0] || uniq[0];
     const segs = []; let beats = 0, k = 0, day = picks.length ? dayOf(picks[0]) : 1, shot = 0;
     const add = (s, b) => { s.t0 = beats * beat; beats += b; s.t1 = beats * beat; s.i = segs.length; segs.push(s); };
     add({kind: 'title', ps: [hero]}, tB * 4);
@@ -972,14 +1022,17 @@ const Reel = {
     for (let b = 0; b * bar < total - 1e-6; b++){ const s = segs.find(s => b * bar + 1e-6 < s.t1); bars.push(s.kind === 'title' ? 'intro' : s.kind === 'flash' ? 'build' : s.kind === 'recap' ? 'fill' : s.kind === 'outro' ? 'outro' : 'drop'); }
     const drops = bars.map((s, i) => s === 'drop' ? i : -1).filter(i => i >= 0); if (drops.length >= 10) bars[drops[Math.floor(drops.length * .55)]] = 'break';
     const lastFlash = segs.map(s => s.kind).lastIndexOf('flash');
-    return {segs, total, beat, bar, bars, shots: shot, n: picks.length, dropAt: lastFlash >= 0 ? segs[lastFlash].t1 : -9,
+    return {segs, total, beat, bar, bars, shots: shot, n: picks.length, picks, all: uniq, dropAt: lastFlash >= 0 ? segs[lastFlash].t1 : -9,
       range: fmtRange(Math.min(...ts), Math.max(...ts)), pool: pool.length, people: new Set(pool.map(p => p.by)).size};
   },
   async prepare(onStep){
     const o = this.opts, pool = this.pool();
     if (!pool.length) throw new Error('empty');
-    const key = JSON.stringify([o.who, o.len, o.music, o.captions, o.quality, pool.map(p => p.id), this.ownName]);
+    if (o.look === 'match' && !this.match) o.look = 'film';
+    if (o.music === 'ref' && !this.match?.audio) o.music = 'golden';
+    const ed = this.edit, key = JSON.stringify([o.who, o.len, o.music, o.captions, o.quality, pool.map(p => p.id), this.ownName, ed.list, this.match && [this.match.name, this.match.durs.length]]);
     if (key !== this.key || !this.tl){
+      const run = this.run = (this.run || 0) + 1;
       const tl = this.plan(pool, o), side = o.quality === 'hd' ? 1600 : 1100, need = new Map();
       tl.segs.forEach(s => s.ps.forEach(p => need.set(p.id, p)));
       for (const [id, v] of this.img) if (!need.has(id) || v.side !== side) this.img.delete(id);
@@ -993,7 +1046,8 @@ const Reel = {
         this.img.set(p.id, {im, back, side});
       }
       if (MUSIC[o.music]) onStep?.('Composing the music…');
-      this.buf = o.music === 'own' ? this.own : MUSIC[o.music] ? await renderMusic(o.music, tl.total, tl.bars) : null;
+      this.buf = o.music === 'own' ? this.own : o.music === 'ref' ? this.match.audio : MUSIC[o.music] ? await renderMusic(o.music, tl.total, tl.bars) : null;
+      if (run !== this.run) return this.prepare(onStep); // settings changed while this was loading
       this.tl = tl; this.key = key;
     }
     try { await Promise.all([document.fonts.load('800 80px "Bricolage Grotesque"'), document.fonts.load('500 24px "DM Mono"')]); } catch (e){}
@@ -1072,6 +1126,12 @@ const Reel = {
   grade(c, W, H, t, flash){
     const look = this.opts.look, tl = this.tl;
     if (look === 'noir'){ c.globalCompositeOperation = 'saturation'; c.fillStyle = '#808080'; c.fillRect(0, 0, W, H); c.globalCompositeOperation = 'soft-light'; c.fillStyle = 'rgba(255,255,255,.12)'; c.fillRect(0, 0, W, H); }
+    if (look === 'match' && this.match){ // lean the colour toward the reference video
+      const m = this.match.look, [r, g, b] = m.tint;
+      if (m.sat < .3){ c.globalCompositeOperation = 'saturation'; c.fillStyle = `rgba(128,128,128,${clamp(1 - m.sat / .3, 0, 1) * .85})`; c.fillRect(0, 0, W, H); }
+      c.globalCompositeOperation = 'soft-light'; c.fillStyle = `rgba(${r},${g},${b},.3)`; c.fillRect(0, 0, W, H);
+      if (m.lum < 90){ c.globalCompositeOperation = 'source-over'; c.fillStyle = `rgba(0,0,0,${clamp((90 - m.lum) / 300, 0, .25)})`; c.fillRect(0, 0, W, H); }
+    }
     if (look === 'film'){
       c.globalCompositeOperation = 'soft-light'; c.fillStyle = 'rgba(255,176,96,.2)'; c.fillRect(0, 0, W, H);
       c.globalCompositeOperation = 'lighten'; c.fillStyle = '#17131d'; c.fillRect(0, 0, W, H);
@@ -1079,7 +1139,7 @@ const Reel = {
       for (const l of leaks){ const k = (t - l) / 1.3; if (k <= 0 || k >= 1) continue; const x = W * (-.2 + 1.4 * k), g = c.createRadialGradient(x, H * .3, 0, x, H * .3, H * .7), al = .5 * Math.sin(Math.PI * k);
         g.addColorStop(0, `rgba(255,150,60,${al})`); g.addColorStop(.5, `rgba(255,70,40,${al * .4})`); g.addColorStop(1, 'rgba(255,60,30,0)'); c.globalCompositeOperation = 'screen'; c.fillStyle = g; c.fillRect(0, 0, W, H); }
     }
-    if (look !== 'clean'){
+    if (look !== 'clean' && look !== 'match'){
       c.globalCompositeOperation = 'source-over'; const v = c.createRadialGradient(W / 2, H / 2, Math.min(W, H) * .42, W / 2, H / 2, Math.hypot(W, H) / 2); v.addColorStop(0, 'rgba(0,0,0,0)'); v.addColorStop(1, 'rgba(0,0,0,.42)'); c.fillStyle = v; c.fillRect(0, 0, W, H);
       if (!this.grain || this.grain.c !== c){
         const n = h('canvas', {width: 160, height: 160}), nc = n.getContext('2d'), d = nc.createImageData(160, 160);
@@ -1136,7 +1196,7 @@ const Reel = {
     let t0;
     if (this.buf && ac){
       const g = ac.createGain(); this.src = ac.createBufferSource(); this.src.buffer = this.buf; this.src.connect(g);
-      if (this.opts.music === 'own'){ g.gain.setValueAtTime(1, ac.currentTime + Math.max(0, tl.total - 1.6)); g.gain.linearRampToValueAtTime(.0001, ac.currentTime + tl.total); }
+      if (this.opts.music === 'own' || this.opts.music === 'ref'){ g.gain.setValueAtTime(1, ac.currentTime + Math.max(0, tl.total - 1.6)); g.gain.linearRampToValueAtTime(.0001, ac.currentTime + tl.total); }
       g.connect(ac.destination); if (dest) g.connect(dest);
       t0 = ac.currentTime + .06; this.src.start(t0, 0, tl.total);
     }
@@ -1171,6 +1231,27 @@ const Reel = {
   },
   setBusy(b){ document.querySelectorAll('[data-reel-go]').forEach(el => el.disabled = b); }
 };
+function renderShots(poster){
+  const box = $('#reel-shots'); if (!box || !Reel.tl) return;
+  const ed = Reel.edit, used = new Set(Reel.tl.picks.map(p => p.id)), shown = ed.list ? Reel.tl.all : Reel.tl.picks, spare = shown.length - used.size;
+  const redo = () => { if (Reel.playing){ Reel.stop(); Reel.setBusy(false); $('#reel-stop').hidden = true; } Reel.key = ''; poster(); };
+  const mine = () => (ed.list ||= Reel.tl.picks.map(p => p.id)); // the first edit freezes the automatic choice
+  const move = (i, d) => { const l = mine(), j = i + d; if (j < 0 || j >= l.length) return; [l[i], l[j]] = [l[j], l[i]]; redo(); };
+  box.replaceChildren(
+    h('div', {class: 'row', style: {justifyContent: 'space-between', alignItems: 'center'}}, h('strong', null, `Photos in this reel (${used.size})`),
+      h('div', {class: 'row'}, h('button', {class: 'btn small', type: 'button', onclick: () => {
+        const have = new Set(shown.map(p => p.id)), rest = Reel.pool().filter(p => !have.has(p.id));
+        openDlg(h('h2', null, 'Add a photo to the reel'), rest.length ? h('div', {class: 'shots'}, rest.map(p => h('button', {class: 'shot', type: 'button', 'aria-label': 'Add this photo', onclick: () => { mine().push(p.id); closeDlg(); redo(); }}, lazyImg(p.thumb))))
+          : h('p', {style: {margin: 0}}, 'Every photo that fits is already in the reel.'));
+      }}, 'Add a photo'), ed.list && h('button', {class: 'btn small quiet', type: 'button', onclick: () => { Reel.resetEdits(); redo(); }}, 'Back to automatic'))),
+    h('p', {style: {margin: 0, color: 'var(--muted)', fontSize: '14px'}}, ed.list ? 'Your own selection, in your order.' : 'Chosen automatically. Reorder, remove or add photos to take over.',
+      spare > 0 && ` ${plural(spare, 'photo')} at the end ${spare === 1 ? "doesn't" : "don't"} fit; pick a longer length to use ${spare === 1 ? 'it' : 'them'}.`),
+    h('div', {class: 'shots'}, shown.map((p, i) => h('div', {class: 'shot' + (used.has(p.id) ? '' : ' spare')}, lazyImg(p.thumb),
+      h('div', {class: 'shot-btns'},
+        h('button', {type: 'button', 'aria-label': 'Move earlier', disabled: i === 0, onclick: () => move(i, -1)}, '◀'),
+        h('button', {type: 'button', 'aria-label': 'Move later', disabled: i === shown.length - 1, onclick: () => move(i, 1)}, '▶'),
+        h('button', {type: 'button', 'aria-label': 'Take out of the reel', disabled: shown.length < 2, onclick: () => { const l = mine(); l.splice(l.indexOf(p.id), 1); redo(); }}, '✕'))))));
+}
 function viewReel(){
   const o = Reel.opts, ppl = peopleList().filter(e => e.count), me = myPerson();
   const group = S.filter.people.length > 0 && (S.filter.people.length > 1 || S.filter.only);
@@ -1184,7 +1265,7 @@ function viewReel(){
       await Reel.prepare(m => { if (run === posterRun && st() && !Reel.playing) st().textContent = m; });
       const cv = $('#reel-canvas'); if (!cv || Reel.playing || run !== posterRun) return;
       const [w, hh] = reelSize(o); cv.width = w; cv.height = hh; Reel.draw(cv.getContext('2d'), w, hh, Math.min(1.4, Reel.tl.total / 2));
-      st().textContent = `${plural(Reel.tl.n, 'photo')} · ${Math.round(Reel.tl.total)} s`;
+      st().textContent = `${plural(Reel.tl.n, 'photo')} · ${Math.round(Reel.tl.total)} s`; renderShots(poster);
     } catch (e){ if (st()) st().textContent = e.message === 'empty' ? 'Add photos to cut a reel.' : "Couldn't load the photos."; }
   };
   const seg = (key, choices) => h('div', {class: 'seg', role: 'group'}, choices.map(([v, label]) => h('button', {type: 'button', 'aria-pressed': String(o[key] === v), onclick: e => { o[key] = v; e.currentTarget.parentNode.querySelectorAll('button').forEach(b => b.setAttribute('aria-pressed', String(b === e.currentTarget))); if (!Reel.playing) poster(); }}, label)));
@@ -1195,19 +1276,36 @@ function viewReel(){
     try { Reel.ac ||= new (window.AudioContext || window.webkitAudioContext)(); Reel.own = await Reel.ac.decodeAudioData(await f.arrayBuffer()); Reel.ownName = f.name; o.music = 'own'; Reel.key = ''; $('#main').dataset.view = ''; render(); }
     catch (err){ toast("Couldn't read that audio file. Try an MP3 or M4A."); }
   };
+  const rerender = () => { $('#main').dataset.view = ''; render(); };
+  $('#file-video').onchange = async e => {
+    const f = e.target.files[0]; e.target.value = ''; if (!f) return; const st = $('#match-status');
+    try {
+      Reel.stop(); const m = await analyzeVideo(f, t => { if (st) st.textContent = t; });
+      if (m.durs.length < 2){ toast("No cuts were found in that video, so there's no edit to copy. Its shape and colour were applied."); }
+      Reel.match = m; o.shape = m.shape; o.look = 'match'; Reel.key = ''; rerender();
+    } catch (err){ if (st) st.textContent = ''; toast("Couldn't read that video. Try an MP4 saved from your phone."); }
+  };
+  const m = Reel.match;
   return h('div', {class: 'reel'},
     h('div', {class: 'stage'},
       h('canvas', {id: 'reel-canvas', width: W, height: H}), h('video', {id: 'reel-video', controls: true, playsinline: true, hidden: true}),
       h('div', {class: 'prog'}, h('i', {id: 'reel-prog'})), h('span', {class: 'mono', id: 'reel-status'}, 'Picking the best shots…')),
     h('div', {class: 'opts'},
+      h('div', {class: 'panel'}, h('strong', null, 'Match a video'),
+        m ? h('p', {style: {margin: '6px 0 10px'}}, m.durs.length >= 2 ? `Copying ${m.name}: ${plural(m.cuts, 'cut')} over ${Math.round(m.total)} s, ${SHAPES[m.shape].join(':')}. Each photo is held exactly as long as the matching shot.` : `Using the shape and colour of ${m.name}.`)
+          : h('p', {style: {margin: '6px 0 10px', color: 'var(--muted)'}}, 'Save a reel or TikTok you like to your device, then choose it here. Your reel copies its cut timing, length, shape and colour. The video stays on this device.'),
+        h('div', {class: 'row'}, h('button', {class: 'btn small', type: 'button', onclick: () => $('#file-video').click()}, m ? 'Choose another video' : 'Choose a video'),
+          m && h('button', {class: 'btn small quiet', type: 'button', onclick: () => { Reel.match = null; if (o.look === 'match') o.look = 'film'; if (o.music === 'ref') o.music = 'golden'; Reel.key = ''; rerender(); }}, 'Stop matching'),
+          h('span', {class: 'busy', id: 'match-status'}))),
       h('div', {class: 'field'}, h('label', {for: 'reel-title'}, 'Title'), h('input', {id: 'reel-title', value: o.title || S.trip.name, maxlength: 48, oninput: e => { o.title = e.target.value; }, onchange: poster})),
       h('div', {class: 'field'}, h('label', {for: 'reel-who'}, 'Starring'), h('select', {id: 'reel-who', onchange: e => { o.who = e.target.value; poster(); }},
         h('option', {value: 'all'}, 'Everyone'), favs > 0 && h('option', {value: 'fav', selected: o.who === 'fav' || null}, `Favourites only (${favs})`), group && h('option', {value: 'sel', selected: o.who === 'sel' || null}, 'Photos with ' + pickedLabel()), ppl.map(e => h('option', {value: e.id, selected: o.who === e.id || null}, (e.id === me ? 'Me' : personLabel(e)) + ` (${e.count})`)))),
-      h('div', {class: 'field'}, h('label', null, 'Length'), seg('len', [[15, '15 s'], [30, '30 s'], [45, '45 s'], [60, '60 s']])),
+      !(m && m.durs.length >= 2) && h('div', {class: 'field'}, h('label', null, 'Length'), seg('len', [[15, '15 s'], [30, '30 s'], [45, '45 s'], [60, '60 s']])),
       h('div', {class: 'field'}, h('label', null, 'Shape'), seg('shape', [['tall', 'Tall 9:16'], ['square', 'Square'], ['wide', 'Wide 16:9']])),
-      h('div', {class: 'field'}, h('label', null, 'Look'), seg('look', [['film', 'Film'], ['clean', 'Clean'], ['noir', 'Black and white']])),
-      h('div', {class: 'field'}, h('label', null, 'Music'), seg('music', [...Object.entries(MUSIC).map(([k, m]) => [k, m.label]), ...(Reel.own ? [['own', Reel.ownName.slice(0, 18)]] : []), ['none', 'No music']]),
-        h('div', null, h('button', {class: 'btn small quiet', type: 'button', onclick: () => $('#file-audio').click()}, 'Use my own track'))),
+      h('div', {class: 'field'}, h('label', null, 'Look'), seg('look', [...(m ? [['match', 'Like the video']] : []), ['film', 'Film'], ['clean', 'Clean'], ['noir', 'Black and white']])),
+      h('div', {class: 'field'}, h('label', null, 'Music'), seg('music', [...Object.entries(MUSIC).map(([k, m]) => [k, m.label]), ...(Reel.own ? [['own', Reel.ownName.slice(0, 18)]] : []), ...(m?.audio ? [['ref', "The video's sound"]] : []), ['none', 'No music']]),
+        h('div', null, h('button', {class: 'btn small quiet', type: 'button', onclick: () => $('#file-audio').click()}, 'Use my own track')),
+        m?.audio && h('span', {style: {color: 'var(--muted)', fontSize: '13px'}}, "Only use the video's sound if you have the right to post it. Adding the song inside TikTok or Instagram when you post is the safer route.")),
       h('div', {class: 'field'}, h('label', null, 'Quality'), seg('quality', [['hd', 'Full HD 1080p'], ['sd', 'Standard 720p']])),
       h('label', {class: 'check', for: 'reel-cap'}, h('input', {type: 'checkbox', id: 'reel-cap', checked: o.captions, onchange: e => { o.captions = e.target.checked; poster(); }}), 'Day cards and photographer credits'),
       h('div', {class: 'row'},
@@ -1215,7 +1313,8 @@ function viewReel(){
         h('button', {class: 'btn primary', type: 'button', 'data-reel-go': 1, onclick: () => Reel.play(true)}, 'Make the video'),
         h('button', {class: 'btn quiet', type: 'button', id: 'reel-stop', hidden: true, onclick: () => { Reel.stop(); Reel.setBusy(false); $('#reel-stop').hidden = true; $('#reel-status').textContent = 'Stopped'; }}, 'Stop'),
         h('button', {class: 'btn primary', type: 'button', id: 'reel-save', hidden: true, onclick: () => Reel.out && saveFile(Reel.out.name, Reel.out.blob)}, 'Save video')),
-      h('p', {class: 'note'}, 'The video records in real time, so a 30 second reel takes 30 seconds. Keep this tab in front while it records, then press Save video. Changing any setting replaces the video with a fresh preview. If the picture stutters, switch Quality to Standard. The built-in tracks are generated here and are free to post.')));
+      h('p', {class: 'note'}, 'The video records in real time, so a 30 second reel takes 30 seconds. Keep this tab in front while it records, then press Save video. Changing any setting replaces the video with a fresh preview. If the picture stutters, switch Quality to Standard. The built-in tracks are generated here and are free to post.')),
+    h('div', {class: 'panel', id: 'reel-shots', style: {gridColumn: '1 / -1'}}, h('span', {class: 'busy'}, 'Choosing photos…')));
 }
 
 /* ───────── routing and boot ───────── */
