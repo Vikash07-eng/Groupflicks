@@ -107,6 +107,12 @@ h1,h2,h3{font-family:var(--display);text-wrap:balance;margin:0;line-height:1.02;
 .sheet{background:var(--film);border-radius:8px;padding:10px;display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px 8px}
 .frame{position:relative;background:none;border:0;padding:0;cursor:pointer;color:var(--film-ink);text-align:left;display:block}
 .frame img{display:block;width:100%;aspect-ratio:3/2;object-fit:cover;border-radius:2px;background:#222}
+.frame .love{position:absolute;left:6px;top:6px;background:rgba(0,0,0,.62);color:#fff;border-radius:999px;padding:1px 8px;font:500 11px var(--mono)}
+.frame .love.mine{background:var(--grease);color:var(--on-grease)}
+.btn.loved{border-color:var(--grease);color:var(--grease)}
+.cap{margin:0;font-weight:600}
+.notes ul{list-style:none;margin:10px 0;padding:0;display:grid;gap:8px}
+.notes li small{color:var(--muted)}
 .frame .edge{display:flex;justify-content:space-between;font:400 10px var(--mono);color:var(--edge);padding:4px 2px 0;letter-spacing:.06em}
 .frame .ring{position:absolute;inset:-4px -3px 12px;pointer-events:none;opacity:0;transform:scale(.9) rotate(-4deg);transition:opacity .15s,transform .2s}
 .frame[aria-pressed="true"] .ring{opacity:1;transform:scale(1) rotate(-4deg)}
@@ -139,7 +145,7 @@ h1,h2,h3{font-family:var(--display);text-wrap:balance;margin:0;line-height:1.02;
 .check{display:flex;gap:8px;align-items:center}
 
 /* dialogs */
-dialog{border:1px solid var(--line);border-radius:16px;background:var(--surface);color:var(--ink);padding:0;width:min(720px,calc(100vw - 24px));max-height:calc(100vh - 24px)}
+dialog{overflow:auto;border:1px solid var(--line);border-radius:16px;background:var(--surface);color:var(--ink);padding:0;width:min(720px,calc(100vw - 24px));max-height:calc(100vh - 24px)}
 dialog::backdrop{background:rgba(5,6,7,.72)}
 .dlg{padding:18px;display:grid;gap:14px}
 .dlg h2{font-size:26px;font-weight:700}

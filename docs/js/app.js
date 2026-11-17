@@ -38,7 +38,7 @@ const myId = LS.get('uid') || 'u' + rid(12); LS.set('uid', myId);
 const S = {
   cloud: !!(CFG.supabaseUrl && CFG.supabaseAnonKey), me: {id: myId, name: LS.get('name', '')}, canWrite: true, canUpload: true, isOwner: false,
   trips: LS.get('trips', []), tripId: null, trip: null, photos: [], people: {}, members: {}, tripLoaded: false, slow: false, creating: false,
-  tab: 'photos', filter: {people: [], only: false, by: null}, selecting: false, sel: new Set(), work: ''
+  tab: 'photos', filter: {people: [], only: false, by: null, love: null}, selecting: false, sel: new Set(), work: ''
 };
 
 /* ───────── encryption: everything is sealed in the browser before it leaves ─────────
@@ -164,7 +164,7 @@ function closeTrip(){
 }
 async function openTrip(id, secret, view){
   closeTrip(); S.canWrite = S.canUpload = !view;
-  Object.assign(S, {tripId: id, tab: 'photos', filter: {people: [], only: false, by: null}, selecting: false, sel: new Set()});
+  Object.assign(S, {tripId: id, tab: 'photos', filter: {people: [], only: false, by: null, love: null}, selecting: false, sel: new Set()});
   A.id = id; A.secret = secret; A.view = !!view; changed();
   try {
     const k = view ? await viewKeys(b64u.dec(secret), id) : await deriveKeys(secret, id); if (A.id !== id) return;
@@ -283,6 +283,20 @@ function avatar(e, cls){
   } else el.textContent = (e?.name || '?').trim().slice(0, 2).toUpperCase();
   return el;
 }
+/* favourites and comments live in each person's own member record, so two people never overwrite each other */
+function heartMap(){ const m = new Map(); for (const v of Object.values(S.members)) for (const id of v.hearts || []) m.set(id, (m.get(id) || 0) + 1); return m; }
+const iHeart = pid => (S.members[S.me.id]?.hearts || []).includes(pid);
+const alive = () => new Set(S.photos.map(p => p.id));
+async function toggleHeart(pid){
+  const cur = new Set(S.members[S.me.id]?.hearts || []), ok = alive(); cur.has(pid) ? cur.delete(pid) : cur.add(pid);
+  await store.putMember(S.tripId, {hearts: [...cur].filter(id => ok.has(id))});
+}
+function commentsOf(pid){ const out = []; for (const [uid, m] of Object.entries(S.members)) for (const c of m.notes?.[pid] || []) out.push({uid, ...c}); return out.sort((a, b) => a.at - b.at); }
+async function saveComments(pid, fn){
+  const ok = alive(), notes = Object.fromEntries(Object.entries(S.members[S.me.id]?.notes || {}).filter(([id]) => ok.has(id)));
+  const next = fn(notes[pid] || []); if (next.length) notes[pid] = next; else delete notes[pid];
+  await store.putMember(S.tripId, {notes});
+}
 /* the people filter: a photo must contain everyone picked, and with "only" set, nobody else */
 const pickedPeople = () => [...new Set(S.filter.people.map(root))];
 function matchPeople(p){ const want = pickedPeople(), s = photoPeople(p); return want.every(id => s.has(id)) && (!S.filter.only || s.size === want.length); }
@@ -295,6 +309,7 @@ function shown(){
   const f = S.filter;
   if (f.people.length) list = list.filter(matchPeople);
   if (f.by) list = list.filter(p => p.by === f.by);
+  if (f.love){ const hm = heartMap(); list = f.love === 'mine' ? list.filter(p => iHeart(p.id)) : list.filter(p => hm.get(p.id)).sort((a, b) => hm.get(b.id) - hm.get(a.id)); }
   return list;
 }
 
@@ -563,12 +578,12 @@ function chipsRow(){
 }
 function viewPhotos(){
   const list = shown(), all = [...S.photos].sort((a, b) => (a.takenAt || a.at) - (b.takenAt || b.at));
-  const uploaders = [...new Set(S.photos.map(p => p.by))];
+  const uploaders = [...new Set(S.photos.map(p => p.by))], hm = heartMap();
   const frames = list.map(p => {
     const n = all.indexOf(p) + 1;
     return h('button', {class: 'frame', type: 'button', 'aria-pressed': String(S.sel.has(p.id)), 'aria-label': 'Photo ' + n,
       onclick: e => { if (S.selecting){ S.sel.has(p.id) ? S.sel.delete(p.id) : S.sel.add(p.id); e.currentTarget.setAttribute('aria-pressed', String(S.sel.has(p.id))); renderDock(); } else photoDialog(p); }},
-      lazyImg(p.thumb),
+      lazyImg(p.thumb), hm.get(p.id) > 0 && h('span', {class: 'love' + (iHeart(p.id) ? ' mine' : '')}, '♥ ' + hm.get(p.id)),
       h('span', {class: 'edge'}, h('span', null, '▸ ' + String(n).padStart(2, '0') + 'A'), h('span', null, nameOf(p.by).toUpperCase().slice(0, 12))));
   });
   frames.forEach(fr => fr.insertAdjacentHTML('beforeend', RING));
@@ -579,6 +594,8 @@ function viewPhotos(){
       h('div', {class: 'row'},
         uploaders.length > 1 && h('select', {id: 'by-filter', 'aria-label': 'Filter by who took it', class: 'btn small quiet', onchange: e => { S.filter.by = e.target.value || null; render(); }},
           h('option', {value: ''}, 'Shot by anyone'), uploaders.map(u => h('option', {value: u, selected: S.filter.by === u || null}, 'Shot by ' + nameOf(u)))),
+        (hm.size > 0 || S.filter.love) && h('select', {id: 'love-filter', 'aria-label': 'Filter by favourites', class: 'btn small quiet', onchange: e => { S.filter.love = e.target.value || null; S.sel.clear(); render(); }},
+          h('option', {value: ''}, 'All photos'), h('option', {value: 'loved', selected: S.filter.love === 'loved' || null}, 'Most loved'), h('option', {value: 'mine', selected: S.filter.love === 'mine' || null}, 'My favourites')),
         list.length > 0 && h('button', {class: 'btn small', type: 'button', onclick: () => { S.selecting = !S.selecting; S.sel.clear(); render(); }}, S.selecting ? 'Done picking' : 'Pick photos'))),
     h('div', {class: 'sheet', id: 'sheet'}, frames.length ? frames : h('div', {class: 'empty'},
       h('strong', null, S.photos.length ? 'No photos match' : 'An empty roll'),
@@ -596,7 +613,7 @@ function renderDock(){
         S.canWrite && h('button', {class: 'btn small', type: 'button', disabled: !picked.length, onclick: () => tagDialog(picked)}, "Tag who's in these"),
         S.canWrite && h('button', {class: 'btn small', type: 'button', disabled: !picked.length, onclick: () => removeDialog(picked)}, 'Remove'),
         h('button', {class: 'btn small primary', type: 'button', disabled: !picked.length, onclick: () => downloadPhotos(picked)}, 'Download ' + picked.length)))));
-  } else if (S.filter.people.length || S.filter.by){
+  } else if (S.filter.people.length || S.filter.by || S.filter.love){
     dock.replaceChildren(h('div', {class: 'dock'}, h('div', null,
       h('span', null, 'Filtered to ', h('strong', null, plural(list.length, 'photo'))),
       h('button', {class: 'btn primary', type: 'button', disabled: !list.length, onclick: () => downloadPhotos(list)}, list.length === 1 ? 'Download this photo' : `Download these ${list.length}`))));
@@ -699,21 +716,37 @@ function removeDialog(picked){
     mine.length > 0 && h('div', {class: 'row'}, go, h('button', {class: 'btn quiet', type: 'button', onclick: closeDlg}, 'Keep them'), status));
 }
 function photoDialog(p){
-  const img = lazyImg(p.full, 'Photo by ' + nameOf(p.by));
+  p = S.photos.find(x => x.id === p.id) || p;
+  const again = () => { const q = S.photos.find(x => x.id === p.id); if (q) photoDialog(q); else closeDlg(); };
+  const img = lazyImg(p.full, p.cap || 'Photo by ' + nameOf(p.by));
   const view = h('div', {class: 'viewer'}, img, (p.faces || []).map(f => h('span', {class: 'box', style: {left: f.b[0] * 100 + '%', top: f.b[1] * 100 + '%', width: f.b[2] * 100 + '%', height: f.b[3] * 100 + '%'}})));
   const inside = h('span', {style: {position: 'relative', display: 'inline-block', lineHeight: 0}}); inside.append(...view.childNodes); view.append(inside);
   const who = [...photoPeople(p)].map(id => peopleList().find(e => e.id === id)).filter(Boolean);
-  const untag = async id => { await store.patchPhoto(S.tripId, p.id, {tags: (p.tags || []).filter(t => root(t) !== id)}); closeDlg(); };
+  const untag = async id => { await store.patchPhoto(S.tripId, p.id, {tags: (p.tags || []).filter(t => root(t) !== id)}); again(); };
+  const loves = heartMap().get(p.id) || 0, mine = iHeart(p.id), notes = commentsOf(p.id);
+  const oops = () => toast("Couldn't save that. Check your connection.");
+  const caption = S.canWrite
+    ? h('form', {class: 'row', onsubmit: async e => { e.preventDefault(); try { await store.patchPhoto(S.tripId, p.id, {cap: $('#cap-in').value.trim().slice(0, 140)}); toast('Caption saved.'); again(); } catch (err){ oops(); } }},
+        h('div', {class: 'field'}, h('label', {for: 'cap-in'}, 'Caption'), h('input', {id: 'cap-in', value: p.cap || '', maxlength: 140, placeholder: 'Say what this is'})), h('button', {class: 'btn small', type: 'submit'}, 'Save'))
+    : p.cap && h('p', {class: 'cap'}, p.cap);
   openDlg(h('h2', null, 'Shot by ' + nameOf(p.by)), h('div', {class: 'mono', style: {color: 'var(--muted)'}}, new Date(p.takenAt || p.at).toLocaleString(undefined, {dateStyle: 'medium', timeStyle: 'short'})),
-    view,
+    view, caption,
     h('div', {class: 'pick-list'}, who.length ? who.map(e => h('span', {class: 'chip'}, avatar(e), personLabel(e),
       S.canWrite && (p.tags || []).some(t => root(t) === e.id) && h('button', {class: 'btn small quiet', type: 'button', 'aria-label': 'Remove tag ' + personLabel(e), onclick: () => untag(e.id)}, '×'))) : h('span', {style: {color: 'var(--muted)'}}, 'No one tagged yet.')),
     h('div', {class: 'row'},
+      S.canWrite ? h('button', {class: 'btn' + (mine ? ' loved' : ''), type: 'button', 'aria-pressed': String(mine), onclick: async () => { try { await toggleHeart(p.id); again(); } catch (err){ oops(); } }}, (mine ? '♥ Favourite' : '♡ Favourite') + (loves ? ' · ' + loves : ''))
+                 : loves > 0 && h('span', {class: 'chip plain'}, '♥ ' + loves),
       S.canWrite && h('button', {class: 'btn', type: 'button', onclick: () => tagDialog([p])}, 'Tag someone'),
       h('button', {class: 'btn primary', type: 'button', onclick: () => downloadPhotos([p])}, 'Download'),
       S.canWrite && canRemove(p) && h('button', {class: 'btn quiet', type: 'button', onclick: e => {
         if (e.currentTarget.dataset.sure){ closeDlg(); store.delPhoto(S.tripId, p).catch(() => toast("Couldn't remove it.")); }
-        else { e.currentTarget.dataset.sure = 1; e.currentTarget.textContent = 'Tap again to remove for everyone'; } }}, 'Remove')));
+        else { e.currentTarget.dataset.sure = 1; e.currentTarget.textContent = 'Tap again to remove for everyone'; } }}, 'Remove')),
+    (notes.length > 0 || S.canWrite) && h('div', {class: 'panel notes'}, h('strong', null, notes.length ? plural(notes.length, 'comment') : 'Comments'),
+      notes.length > 0 && h('ul', null, notes.map(c => h('li', null, h('b', null, nameOf(c.uid)), ' ', c.text, ' ',
+        h('small', null, new Date(c.at).toLocaleDateString(undefined, {day: 'numeric', month: 'short'})),
+        c.uid === S.me.id && S.canWrite && h('button', {class: 'btn small quiet', type: 'button', 'aria-label': 'Delete your comment', onclick: async () => { try { await saveComments(p.id, l => l.filter(x => x.at !== c.at)); again(); } catch (err){ oops(); } }}, '×')))),
+      S.canWrite && h('form', {class: 'row', onsubmit: async e => { e.preventDefault(); const t = $('#note-in').value.trim(); if (!t) return; try { await saveComments(p.id, l => [...l, {at: Date.now(), text: t.slice(0, 300)}]); again(); } catch (err){ oops(); } }},
+        h('div', {class: 'field'}, h('label', {for: 'note-in'}, 'Add a comment'), h('input', {id: 'note-in', maxlength: 300, placeholder: 'Only people with the link can read it'})), h('button', {class: 'btn small', type: 'submit'}, 'Post'))));
 }
 /* two face groups that are really one person: point one at the other, so every photo counts once */
 async function mergePeople(from, into){
@@ -895,7 +928,7 @@ const reelSize = o => { const s = o.quality === 'hd' ? 1080 : 720, [a, b] = SHAP
 const Reel = {
   opts: {who: 'all', len: 30, music: 'golden', title: '', captions: true, shape: 'tall', look: 'film', quality: 'hd'},
   tl: null, img: new Map(), buf: null, own: null, ownName: '', key: '', ac: null, src: null, raf: 0, playing: false, rec: null, out: null, grain: null,
-  pool(){ const w = this.opts.who; return [...S.photos].filter(p => w === 'all' || (w === 'sel' ? matchPeople(p) : photoPeople(p).has(w))).sort((a, b) => (a.takenAt || a.at) - (b.takenAt || b.at)); },
+  pool(){ const w = this.opts.who; const hm = w === 'fav' ? heartMap() : null; return [...S.photos].filter(p => w === 'all' || (w === 'fav' ? hm.get(p.id) > 0 : w === 'sel' ? matchPeople(p) : photoPeople(p).has(w))).sort((a, b) => (a.takenAt || a.at) - (b.takenAt || b.at)); },
   pick(pool, n, score){
     if (pool.length <= n) return pool; const out = [];
     for (let i = 0; i < n; i++){ const a = Math.floor(i * pool.length / n), b = Math.floor((i + 1) * pool.length / n); out.push(pool.slice(a, b).sort((x, y) => score(y) - score(x))[0]); }
@@ -915,7 +948,7 @@ const Reel = {
     const M = MUSIC[o.music], beat = M ? 60 / M.bpm : .6, bar = 4 * beat, when = p => p.takenAt || p.at;
     const ts = pool.map(when), d0 = new Date(Math.min(...ts)); d0.setHours(0, 0, 0, 0);
     const dayOf = p => Math.floor((new Date(when(p)).setHours(0, 0, 0, 0) - d0.getTime()) / 864e5) + 1;
-    const maxS = Math.max(1, ...pool.map(p => p.sharp || 0)), score = p => (p.sharp || 0) / maxS + Math.min(photoPeople(p).size, 4) * .15;
+    const maxS = Math.max(1, ...pool.map(p => p.sharp || 0)), hm = heartMap(), score = p => (p.sharp || 0) / maxS + Math.min(photoPeople(p).size, 4) * .15 + Math.min(hm.get(p.id) || 0, 5) * .2;
     const uniq = []; // burst shots: keep the best of several taken seconds apart by the same person
     for (const p of pool){ const q = uniq[uniq.length - 1]; if (q && q.by === p.by && Math.abs(when(p) - when(q)) < 3000){ if (score(p) > score(q)) uniq[uniq.length - 1] = p; } else uniq.push(p); }
     const cap = Math.min(uniq.length, 48), B = Math.max(4, Math.floor(o.len / bar)), tB = B >= 16 ? 2 : 1, oB = B >= 16 ? 2 : 1;
@@ -1007,7 +1040,9 @@ const Reel = {
       if (o.captions && s.lay === 'single' && s.t1 - s.t0 >= tl.beat * 2 - .01){
         const g = c.createLinearGradient(0, H * .78, 0, H); g.addColorStop(0, 'rgba(0,0,0,0)'); g.addColorStop(1, 'rgba(0,0,0,.6)'); c.fillStyle = g; c.fillRect(0, H * .78, W, H * .22);
         const k = ease(clamp(el / .3, 0, 1)), ms = s.ps[0].takenAt || s.ps[0].at; c.globalAlpha = a * k; c.font = mono(19 * U); c.fillStyle = 'rgba(255,255,255,.9)';
-        c.fillText((new Date(ms).toLocaleDateString(undefined, {weekday: 'short', day: 'numeric', month: 'short'}) + ' · shot by ' + nameOf(s.ps[0].by)).toUpperCase(), pad, H - pad + (1 - k) * 12 * U);
+        const line = (new Date(ms).toLocaleDateString(undefined, {weekday: 'short', day: 'numeric', month: 'short'}) + ' · shot by ' + nameOf(s.ps[0].by)).toUpperCase();
+        if (s.ps[0].cap){ c.font = `700 ${30 * U}px "Hanken Grotesk", sans-serif`; c.fillStyle = '#fff'; const ls = this.lines(c, s.ps[0].cap, W - pad * 2).slice(0, 2); ls.forEach((l, i) => c.fillText(l, pad, H - pad - 34 * U - (ls.length - 1 - i) * 36 * U + (1 - k) * 12 * U)); c.font = mono(19 * U); c.fillStyle = 'rgba(255,255,255,.9)'; }
+        c.fillText(line, pad, H - pad + (1 - k) * 12 * U);
       }
     } else if (s.kind === 'flash'){
       this.cell(c, 0, 0, W, H, s.ps[0], u, s.i, 1.07 - .07 * ease(clamp(u * 2, 0, 1)));
@@ -1139,7 +1174,8 @@ const Reel = {
 function viewReel(){
   const o = Reel.opts, ppl = peopleList().filter(e => e.count), me = myPerson();
   const group = S.filter.people.length > 0 && (S.filter.people.length > 1 || S.filter.only);
-  if (o.who === 'sel' ? !group : o.who !== 'all' && !ppl.some(e => e.id === o.who)) o.who = 'all';
+  const favs = heartMap().size;
+  if (o.who === 'fav' ? !favs : o.who === 'sel' ? !group : o.who !== 'all' && !ppl.some(e => e.id === o.who)) o.who = 'all';
   let posterRun = 0;
   const poster = async () => {
     const run = ++posterRun, st = () => $('#reel-status');
@@ -1166,7 +1202,7 @@ function viewReel(){
     h('div', {class: 'opts'},
       h('div', {class: 'field'}, h('label', {for: 'reel-title'}, 'Title'), h('input', {id: 'reel-title', value: o.title || S.trip.name, maxlength: 48, oninput: e => { o.title = e.target.value; }, onchange: poster})),
       h('div', {class: 'field'}, h('label', {for: 'reel-who'}, 'Starring'), h('select', {id: 'reel-who', onchange: e => { o.who = e.target.value; poster(); }},
-        h('option', {value: 'all'}, 'Everyone'), group && h('option', {value: 'sel', selected: o.who === 'sel' || null}, 'Photos with ' + pickedLabel()), ppl.map(e => h('option', {value: e.id, selected: o.who === e.id || null}, (e.id === me ? 'Me' : personLabel(e)) + ` (${e.count})`)))),
+        h('option', {value: 'all'}, 'Everyone'), favs > 0 && h('option', {value: 'fav', selected: o.who === 'fav' || null}, `Favourites only (${favs})`), group && h('option', {value: 'sel', selected: o.who === 'sel' || null}, 'Photos with ' + pickedLabel()), ppl.map(e => h('option', {value: e.id, selected: o.who === e.id || null}, (e.id === me ? 'Me' : personLabel(e)) + ` (${e.count})`)))),
       h('div', {class: 'field'}, h('label', null, 'Length'), seg('len', [[15, '15 s'], [30, '30 s'], [45, '45 s'], [60, '60 s']])),
       h('div', {class: 'field'}, h('label', null, 'Shape'), seg('shape', [['tall', 'Tall 9:16'], ['square', 'Square'], ['wide', 'Wide 16:9']])),
       h('div', {class: 'field'}, h('label', null, 'Look'), seg('look', [['film', 'Film'], ['clean', 'Clean'], ['noir', 'Black and white']])),
