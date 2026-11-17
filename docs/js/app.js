@@ -725,7 +725,7 @@ async function findDuplicates(onStep){
   const parent = ps.map((_, i) => i), find = i => parent[i] === i ? i : (parent[i] = find(parent[i]));
   for (let i = 0; i < ps.length; i++) for (let j = i + 1; j < ps.length; j++){
     const gap = hashGap(hash.get(ps[i].id), hash.get(ps[j].id)), burst = ps[i].by === ps[j].by && Math.abs((ps[i].takenAt || ps[i].at) - (ps[j].takenAt || ps[j].at)) <= 4000;
-    if (gap <= 5 || (burst && gap <= 22)) parent[find(j)] = find(i);
+    if (gap <= 5 || (burst && gap <= 14)) parent[find(j)] = find(i);
   }
   const groups = new Map(); ps.forEach((p, i) => { const r = find(i); groups.set(r, [...(groups.get(r) || []), p]); });
   const hm = heartMap(), rank = p => (hm.get(p.id) || 0) * 1e9 + (p.sharp || 0);
