@@ -51,12 +51,15 @@ const b64u = {
   dec(str){ const s = atob(str.replace(/-/g, '+').replace(/_/g, '/')), u = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) u[i] = s.charCodeAt(i); return u; }
 };
 const randId = n => b64u.enc(crypto.getRandomValues(new Uint8Array(n)));
+const hkdf = async (raw, albumId, info) => new Uint8Array(await crypto.subtle.deriveBits({name: 'HKDF', hash: 'SHA-256', salt: te.encode('groupflicks-v1:' + albumId), info: te.encode(info)},
+  await crypto.subtle.importKey('raw', raw, 'HKDF', false, ['deriveBits']), 256));
+/* a view-only link carries just the content key: enough to read and decrypt, not to change anything */
+async function viewKeys(contentKey, albumId){
+  return {key: await crypto.subtle.importKey('raw', contentKey, 'AES-GCM', false, ['encrypt', 'decrypt']), vk: b64u.enc(contentKey), read: b64u.enc(await hkdf(contentKey, albumId, 'read')), token: null};
+}
 async function deriveKeys(secret, albumId){
-  const base = await crypto.subtle.importKey('raw', b64u.dec(secret), 'HKDF', false, ['deriveKey', 'deriveBits']);
-  const salt = te.encode('groupflicks-v1:' + albumId);
-  const key = await crypto.subtle.deriveKey({name: 'HKDF', hash: 'SHA-256', salt, info: te.encode('content')}, base, {name: 'AES-GCM', length: 256}, false, ['encrypt', 'decrypt']);
-  const bits = await crypto.subtle.deriveBits({name: 'HKDF', hash: 'SHA-256', salt, info: te.encode('access')}, base, 256);
-  return {key, token: b64u.enc(new Uint8Array(bits))};
+  const raw = b64u.dec(secret);
+  return {...await viewKeys(await hkdf(raw, albumId, 'content'), albumId), token: b64u.enc(await hkdf(raw, albumId, 'access'))};
 }
 async function seal(key, bytes, aad){
   const iv = crypto.getRandomValues(new Uint8Array(12));
@@ -75,7 +78,7 @@ class Remote {
     if (!r.ok){
       // the database reports a wrong or unknown link as code P0002, which arrives as a server error
       let code = ''; try { code = (await r.json()).code || ''; } catch (e){}
-      throw Object.assign(new Error('rpc ' + r.status), {status: code === 'P0002' ? 404 : r.status});
+      throw Object.assign(new Error('rpc ' + r.status), {status: code === 'P0002' ? 404 : r.status, code, missing: code === 'PGRST202'});
     }
     const t = await r.text(); return t ? JSON.parse(t) : null;
   }
@@ -90,14 +93,18 @@ class Remote {
   async download(a, bid){ const r = await fetch(`${this.url}/storage/v1/object/public/gf-photos/${a}/${bid}`); if (!r.ok) throw new Error('download ' + r.status); return r.arrayBuffer(); }
   async remove(a, bid){ try { return (await fetch(`${this.url}/storage/v1/object/gf-photos/${a}/${bid}`, {method: 'DELETE', headers: this.h})).ok; } catch (e){ return false; } }
   deleteAlbum(a, t){ return this.rpc('gf_delete_album', {p_album: a, p_token: t}); }
+  setRead(a, t, r){ return this.rpc('gf_set_read', {p_album: a, p_token: t, p_read: r}); }
+  allowFiles(a, t, names, op){ return this.rpc('gf_allow_files', {p_album: a, p_token: t, p_names: names, p_op: op}); }
 }
 class Memory {
   constructor(){ this.albums = new Map(); this.blobs = new Map(); this.n = 0; }
-  need(a, t){ const al = this.albums.get(a); if (!al || al.token !== t) throw Object.assign(new Error('not found'), {status: 404}); return al; }
+  need(a, t, read){ const al = this.albums.get(a); if (!al || !(al.token === t || (read && al.read === t))) throw Object.assign(new Error('not found'), {status: 404}); return al; }
+  async setRead(a, t, r){ this.need(a, t).read = r; }
+  async allowFiles(a, t){ this.need(a, t); }
   async createAlbum(a, t){ this.albums.set(a, {token: t, docs: new Map()}); }
   async put(a, t, id, kind, data){ this.need(a, t).docs.set(id, {id, kind, data, deleted: false, seq: ++this.n}); return this.n; }
   async del(a, t, id){ const d = this.need(a, t).docs.get(id); if (d){ d.deleted = true; d.data = ''; d.seq = ++this.n; } }
-  async list(a, t, since){ return [...this.need(a, t).docs.values()].filter(d => d.seq > since).sort((x, y) => x.seq - y.seq); }
+  async list(a, t, since){ return [...this.need(a, t, true).docs.values()].filter(d => d.seq > since).sort((x, y) => x.seq - y.seq); }
   async upload(a, bid, bytes){ this.blobs.set(a + '/' + bid, bytes); }
   async download(a, bid){ const b = this.blobs.get(a + '/' + bid); if (!b) throw new Error('missing'); return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength); }
   async remove(a, bid){ return this.blobs.delete(a + '/' + bid); }
@@ -106,7 +113,7 @@ class Memory {
 const BE = S.cloud ? new Remote(CFG.supabaseUrl, CFG.supabaseAnonKey) : new Memory();
 
 /* ───────── the open album ───────── */
-const A = {id: null, secret: null, key: null, token: null, seq: 0, docs: new Map(), blobs: new Map(), urls: new Map(), timer: 0, polls: 0};
+const A = {id: null, secret: null, key: null, token: null, read: null, vk: null, view: false, seq: 0, docs: new Map(), blobs: new Map(), urls: new Map(), timer: 0, polls: 0};
 const aad = id => A.id + '/' + id;
 function syncState(){
   const photos = [], people = {}, members = {};
@@ -116,7 +123,7 @@ function syncState(){
   const had = !!S.trip;
   S.trip = A.docs.get('album')?.v || null; S.photos = photos; S.people = people; S.members = members;
   if (had && !S.trip && !S.creating){ S.gone = true; clearInterval(A.timer); forget(A.id); }
-  S.isOwner = !!S.trip && S.trip.by === S.me.id;
+  S.isOwner = !!S.trip && S.trip.by === S.me.id && S.canWrite;
   if (S.trip) remember();
   changed();
 }
@@ -124,12 +131,13 @@ function forget(id){ S.trips = S.trips.filter(t => t.id !== id); LS.set('trips',
 function albumGone(){ if (!A.id) return; clearInterval(A.timer); const had = !!S.trip; A.docs = new Map(); forget(A.id); syncState(); if (had) S.gone = true; changed(); }
 function remember(){
   const cur = S.trips.find(t => t.id === A.id);
-  if (cur && cur.name === S.trip.name && cur.place === S.trip.place) return;
-  S.trips = [{id: A.id, secret: A.secret, name: S.trip.name, place: S.trip.place || '', at: Date.now()}, ...S.trips.filter(t => t.id !== A.id)].slice(0, 50);
+  if (cur && (!cur.view || A.view) && cur.name === S.trip.name && cur.place === S.trip.place) return;
+  if (cur && !cur.view && A.view) return; // keep the full link if this device already has it
+  S.trips = [{id: A.id, secret: A.secret, view: A.view, name: S.trip.name, place: S.trip.place || '', at: Date.now()}, ...S.trips.filter(t => t.id !== A.id)].slice(0, 50);
   LS.set('trips', S.trips);
 }
 async function pull(full){
-  const id = A.id, rows = await BE.list(id, A.token, full ? 0 : A.seq);
+  const id = A.id, rows = await BE.list(id, A.token || A.read, full ? 0 : A.seq);
   if (A.id !== id || !rows) return;
   let dirty = false;
   for (const r of rows){
@@ -143,6 +151,7 @@ async function pull(full){
   if (dirty){ syncState(); Face.backfill(); }
 }
 async function putDoc(id, kind, v){
+  if (!S.canWrite) throw fail('This is a view-only link.');
   const prev = A.docs.get(id);
   A.docs.set(id, {kind, v, seq: prev?.seq || 0}); syncState();
   const data = b64u.enc(await seal(A.key, te.encode(JSON.stringify(v)), aad(id)));
@@ -150,16 +159,16 @@ async function putDoc(id, kind, v){
 }
 function closeTrip(){
   clearInterval(A.timer); for (const u of A.urls.values()) URL.revokeObjectURL(u);
-  Object.assign(A, {id: null, secret: null, key: null, token: null, seq: 0, docs: new Map(), blobs: new Map(), urls: new Map(), polls: 0});
-  Object.assign(S, {tripId: null, trip: null, photos: [], people: {}, members: {}, tripLoaded: false, slow: false, gone: false});
+  Object.assign(A, {id: null, secret: null, key: null, token: null, read: null, vk: null, view: false, readSet: false, seq: 0, docs: new Map(), blobs: new Map(), urls: new Map(), polls: 0});
+  Object.assign(S, {tripId: null, trip: null, photos: [], people: {}, members: {}, tripLoaded: false, slow: false, gone: false, canWrite: true, canUpload: true});
 }
-async function openTrip(id, secret){
-  closeTrip();
+async function openTrip(id, secret, view){
+  closeTrip(); S.canWrite = S.canUpload = !view;
   Object.assign(S, {tripId: id, tab: 'photos', filter: {people: [], only: false, by: null}, selecting: false, sel: new Set()});
-  A.id = id; A.secret = secret; changed();
+  A.id = id; A.secret = secret; A.view = !!view; changed();
   try {
-    const k = await deriveKeys(secret, id); if (A.id !== id) return;
-    A.key = k.key; A.token = k.token; await pull(true);
+    const k = view ? await viewKeys(b64u.dec(secret), id) : await deriveKeys(secret, id); if (A.id !== id) return;
+    Object.assign(A, {key: k.key, token: k.token, read: k.read, vk: k.vk}); await pull(true);
   } catch (e){
     if (A.id !== id) return;
     S.tripLoaded = true; S.slow = !(e.status >= 400 && e.status < 500); if (e.status === 404) forget(id); changed(); return;
@@ -168,9 +177,17 @@ async function openTrip(id, secret){
   S.tripLoaded = true; if (!S.trip && !S.creating) forget(id); changed(); joinTrip();
   A.timer = setInterval(() => { if (!document.hidden && A.key) pull(++A.polls % 12 === 0).catch(e => { if (e.status === 404) albumGone(); }); }, 5000);
 }
+/* ask the server's leave before touching files; a database from before this existed has no such step */
+const LIMITS = {GF001: 'Too many uploads from this network in the last hour. Try again later.', GF002: 'This album is full (2,000 photos).', GF003: "The site's storage is full. Ask the person who runs it to free up space."};
+async function allow(names, op){
+  if (BE.noGrants || !names.length) return;
+  try { await retry(() => BE.allowFiles(A.id, A.token, names, op)); }
+  catch (e){ if (e.missing){ BE.noGrants = true; return; } throw LIMITS[e.code] ? fail(LIMITS[e.code], Object.assign(e, {limit: true})) : e; }
+}
 async function deleteAlbum(onStep){
   const id = A.id, token = A.token, docs = [...A.docs.keys()], files = S.photos.flatMap(p => [p.full, p.thumb]).filter(Boolean);
   clearInterval(A.timer);
+  for (let i = 0; i < files.length; i += 300) await allow(files.slice(i, i + 300), 'delete');
   let left = 0;
   for (let i = 0; i < files.length; i += 6){ onStep(`Deleting file ${Math.min(i + 6, files.length)} of ${files.length}…`); left += (await Promise.all(files.slice(i, i + 6).map(f => BE.remove(id, f)))).filter(ok => !ok).length; }
   if (left) console.warn(`Groupflicks: ${left} encrypted files could not be erased from storage.`);
@@ -184,14 +201,14 @@ async function deleteAlbum(onStep){
 }
 async function createTrip(name, place, extra){
   const id = randId(16), secret = randId(32), k = await deriveKeys(secret, id);
-  await BE.createAlbum(id, k.token);
+  await BE.createAlbum(id, k.token); BE.setRead(id, k.token, k.read).catch(() => {});
   S.creating = true;
   try { await openTrip(id, secret); await putDoc('album', 'album', {name, place: place || '', createdAt: Date.now(), by: S.me.id, ...extra}); }
   finally { S.creating = false; }
   location.hash = 'a=' + id + '.' + secret; joinTrip();
 }
 function joinTrip(){
-  if (!S.trip || S.members[S.me.id]) return;
+  if (!S.trip || !S.canWrite || S.members[S.me.id]) return;
   if (!S.me.name){ nameDialog(); return; }
   store.putMember(S.tripId, {name: S.me.name, joinedAt: Date.now()}).catch(() => {});
 }
@@ -209,8 +226,8 @@ const store = {
     return p;
   },
   async urlOf(id){ const urls = A.urls; if (!urls.has(id)){ const b = await this.blob(id); if (!urls.has(id)) urls.set(id, URL.createObjectURL(b)); } return urls.get(id); },
-  async upload(blob){
-    const id = randId(16), album = A.id, sealed = await seal(A.key, new Uint8Array(await blob.arrayBuffer()), aad(id));
+  async upload(blob, id){
+    const album = A.id, sealed = await seal(A.key, new Uint8Array(await blob.arrayBuffer()), aad(id));
     await retry(() => BE.upload(album, id, sealed));
     A.blobs.set(id, Promise.resolve(blob)); A.urls.set(id, URL.createObjectURL(blob)); return id;
   },
@@ -218,6 +235,7 @@ const store = {
   patchPhoto: (_, pid, patch) => putDoc(pid, 'photo', {...A.docs.get(pid)?.v, ...patch}),
   async delPhoto(_, p){
     A.docs.delete(p.id); syncState(); await BE.del(A.id, A.token, p.id);
+    await allow([p.full, p.thumb].filter(Boolean), 'delete').catch(() => {});
     const ok = await Promise.all([BE.remove(A.id, p.full), BE.remove(A.id, p.thumb)]);
     if (ok.includes(false)) console.warn('Groupflicks: a deleted photo is gone from the album, but its encrypted file could not be erased from storage.');
   },
@@ -236,6 +254,7 @@ async function retry(fn, tries = 3){
     catch (e){ if (i >= tries - 1 || (e.status >= 400 && e.status < 500 && e.status !== 408 && e.status !== 429)) throw e; await new Promise(r => setTimeout(r, 700 * 2 ** i)); }
   }
 }
+const fail = (why, e) => Object.assign(e || new Error(why), {why});
 const loadScript = src => new Promise((res, rej) => { const s = document.createElement('script'); s.src = src; s.onload = res; s.onerror = rej; document.head.append(s); });
 
 const lazyImg = (id, alt) => { const im = h('img', {alt: alt || ''}); lazy(im, id); return im; };
@@ -253,7 +272,7 @@ function peopleList(){
   }
   return [...m.values()].sort((a, b) => (!!b.name - !!a.name) || b.count - a.count);
 }
-const myPerson = () => { const id = S.members[S.me.id]?.me; return id ? root(id) : null; };
+const myPerson = () => { const id = S.members[S.me.id]?.me || (A.view && A.id ? LS.get('me.' + A.id) : null); return id ? root(id) : null; };
 const personLabel = e => e.name || 'Unnamed';
 function avatar(e, cls){
   const el = h('span', {class: 'av ' + (cls || '')});
@@ -363,7 +382,8 @@ async function exifDate(file){
 async function addImage(source, takenAt){
   const full = fit(source, 2048), thumb = fit(source, 480);
   const [fb, tb] = await Promise.all([toBlob(full, .88), toBlob(thumb, .8)]);
-  const data = {full: await store.upload(fb), thumb: await store.upload(tb), w: full.width, h: full.height, takenAt, at: Date.now(), by: S.me.id, sharp: sharpness(thumb)};
+  const ids = [randId(16), randId(16)]; await allow(ids, 'upload');
+  const data = {full: await store.upload(fb, ids[0]), thumb: await store.upload(tb, ids[1]), w: full.width, h: full.height, takenAt, at: Date.now(), by: S.me.id, sharp: sharpness(thumb)};
   if (Face.state === 'ready'){ try { data.faces = Face.assign(await Face.detect(fit(full, 1600))); } catch (e){} }
   const id = rid(9), tid = S.tripId; Face.busy.add(id);
   await retry(() => store.putPhoto(tid, id, data));
@@ -376,7 +396,6 @@ async function looksHeic(f){
   if (/hei[cf]/i.test(f.type) || /\.hei[cf]$/i.test(f.name)) return true;
   try { const b = new Uint8Array(await f.slice(0, 16).arrayBuffer()); return /^ftyp(heic|heix|hevc|hevx|heim|heis|mif1|msf1)/.test(String.fromCharCode(...b.subarray(4, 12))); } catch (e){ return false; }
 }
-const fail = (why, e) => Object.assign(e || new Error(why), {why});
 async function decodeImage(f){
   try { return await createImageBitmap(f, {imageOrientation: 'from-image'}); } catch (e){}
   const u = URL.createObjectURL(f);
@@ -405,8 +424,9 @@ async function runUploads(){
       const src = await decodeImage(f);
       await addImage(src, (await exifDate(f)) || f.lastModified || Date.now()); src.close?.();
     } catch (e){
-      Up.failed.push({file: f, why: e.why || (e.status === 413 ? 'The file is too large for the album.' : e.status >= 400 && e.status < 500 ? "The album didn't accept it. It may be full or deleted." : 'The upload failed. Check your connection.')});
+      Up.failed.push({file: f, limit: !!e.limit, why: e.why || (e.status === 413 ? 'The file is too large for the album.' : e.status >= 400 && e.status < 500 ? "The album didn't accept it. It may be full or deleted." : 'The upload failed. Check your connection.')});
     }
+    if (Up.failed.length && Up.failed[Up.failed.length - 1].limit){ const why = Up.failed[Up.failed.length - 1].why; for (const g of Up.queue.splice(0)){ Up.failed.push({file: g, why, limit: true}); Up.done++; } }
     Up.done++; renderTray();
   }
   Up.running = false; Up.current = ''; renderTray();
@@ -474,14 +494,15 @@ async function downloadPhotos(list){
 let renderQueued = false;
 function changed(){ if (renderQueued) return; renderQueued = true; requestAnimationFrame(() => { renderQueued = false; render(); }); }
 function render(){
-  $('#who').textContent = S.cloud ? 'End-to-end encrypted' : 'Demo · this tab only';
+  $('#who').textContent = (S.tripId && A.view ? 'View only · ' : '') + (S.cloud ? 'End-to-end encrypted' : 'Demo · this tab only');
   const main = $('#main');
   if (S.tripId && S.tab === 'reel' && main.dataset.view === 'reel:' + S.tripId){ renderDock(); return; } // keep the canvas alive
   main.replaceChildren(S.tripId ? viewTrip() : viewHome());
   main.dataset.view = S.tripId ? S.tab + ':' + S.tripId : 'home';
   renderDock();
 }
-function parseLink(text){ const m = (text || '').match(/a=([A-Za-z0-9_-]{16,40})\.([A-Za-z0-9_-]{40,50})/); return m ? {id: m[1], secret: m[2]} : null; }
+function parseLink(text){ const m = (text || '').match(/\b([av])=([A-Za-z0-9_-]{16,40})\.([A-Za-z0-9_-]{40,50})/); return m ? {id: m[2], secret: m[3], view: m[1] === 'v'} : null; }
+const hashOf = t => (t.view ? 'v=' : 'a=') + t.id + '.' + t.secret;
 function viewHome(){
   const colors = ['#c98b5a', '#6b93b8', '#d9a441', '#7fa58a', '#b86a6a', '#8d86b5'];
   const strip = h('div', {class: 'strip', 'aria-hidden': 'true'}, colors.map((c, i) => h('span', {class: i === 4 ? 'pick' : '', style: {background: `linear-gradient(160deg, ${c}, #1a1c1f 140%)`}}, h('b', null, (i + 11) + 'A'))));
@@ -490,7 +511,7 @@ function viewHome(){
     if ($('#your-name')) setName($('#your-name').value);
     const btn = e.target.querySelector('button[type=submit]'); btn.disabled = true;
     try { await createTrip(name, $('#trip-place').value.trim()); }
-    catch (err){ btn.disabled = false; toast("Couldn't create the trip. Check your connection and try again."); }
+    catch (err){ btn.disabled = false; toast(err.code === 'GF001' ? 'Too many new albums from this network today. Try again later.' : "Couldn't create the trip. Check your connection and try again."); }
   }},
     h('h2', {class: 'sect'}, 'Start a trip'),
     h('div', {class: 'row'},
@@ -498,13 +519,13 @@ function viewHome(){
       h('div', {class: 'field'}, h('label', {for: 'trip-place'}, 'Place (optional)'), h('input', {id: 'trip-place', placeholder: 'Lisbon, Portugal', maxlength: 60})),
       !S.me.name && h('div', {class: 'field'}, h('label', {for: 'your-name'}, 'Your name'), h('input', {id: 'your-name', placeholder: 'What friends call you', maxlength: 40, required: true, autocomplete: 'given-name'})),
       h('button', {class: 'btn primary', type: 'submit'}, 'Create album')));
-  const join = h('form', {class: 'panel', onsubmit: e => { e.preventDefault(); const l = parseLink($('#join-link').value); if (l) location.hash = 'a=' + l.id + '.' + l.secret; else toast("That doesn't look like a Groupflicks link. Paste the whole link."); }},
+  const join = h('form', {class: 'panel', onsubmit: e => { e.preventDefault(); const l = parseLink($('#join-link').value); if (l) location.hash = hashOf(l); else toast("That doesn't look like a Groupflicks link. Paste the whole link."); }},
     h('h2', {class: 'sect'}, 'Got an invite link?'),
     h('div', {class: 'row'}, h('div', {class: 'field'}, h('label', {for: 'join-link'}, 'Paste the link'), h('input', {id: 'join-link', placeholder: 'https://…#a=…', autocomplete: 'off'})), h('button', {class: 'btn', type: 'submit'}, 'Open')));
   const trips = [...S.trips].sort((a, b) => (b.at || 0) - (a.at || 0));
   const list = h('div', null, h('h2', {class: 'sect'}, 'Your trips on this device'),
-    trips.length ? h('ul', {class: 'trips'}, trips.map(t => h('li', null, h('button', {class: 'trip', type: 'button', onclick: () => { location.hash = 'a=' + t.id + '.' + t.secret; }},
-      h('span', {class: 'tn'}), h('span', null, h('strong', null, t.name), h('small', null, t.place || 'Open album'))))))
+    trips.length ? h('ul', {class: 'trips'}, trips.map(t => h('li', null, h('button', {class: 'trip', type: 'button', onclick: () => { location.hash = hashOf(t); }},
+      h('span', {class: 'tn'}), h('span', null, h('strong', null, t.name), h('small', null, [t.place, t.view ? 'View only' : ''].filter(Boolean).join(' · ') || 'Open album'))))))
     : h('div', {class: 'panel'}, h('p', {style: {margin: '0 0 12px', color: 'var(--muted)'}}, 'No trips yet. Create one, or try the sample to see how the album and reel work.'),
         h('button', {class: 'btn small', type: 'button', onclick: makeSample}, 'Try a sample trip'), ' ', h('span', {class: 'busy', id: 'work'}, S.work)));
   return h('div', null,
@@ -599,15 +620,26 @@ function viewPeople(){
 /* ───────── dialogs ───────── */
 function openDlg(...kids){ const d = $('#dlg'); d.replaceChildren(h('div', {class: 'dlg'}, h('button', {class: 'btn small quiet x', type: 'button', 'aria-label': 'Close', onclick: () => d.close()}, 'Close'), ...kids)); if (!d.open) d.showModal(); return d; }
 const closeDlg = () => $('#dlg').close();
+function linkRow(id, label, link, primary){
+  return h('div', {class: 'row'}, h('div', {class: 'field'}, h('label', {for: id}, label), h('input', {id, readonly: true, value: link, onfocus: e => e.target.select()})),
+    h('button', {class: 'btn' + (primary ? ' primary' : ''), type: 'button', onclick: async () => { try { await navigator.clipboard.writeText(link); toast('Link copied'); } catch (e){ $('#' + id).select(); toast('Select the link and copy it'); } }}, 'Copy'),
+    navigator.share && h('button', {class: 'btn', type: 'button', onclick: () => navigator.share({title: S.trip.name + ' on Groupflicks', url: link}).catch(() => {})}, 'Share'));
+}
 function inviteDialog(){
-  const link = location.origin + location.pathname + '#a=' + A.id + '.' + A.secret;
+  const base = location.origin + location.pathname, full = base + '#a=' + A.id + '.' + A.secret, view = base + '#v=' + A.id + '.' + A.vk;
+  const viewBox = h('div', {class: 'panel'}, h('strong', null, 'View-only link'), h('p', {style: {margin: '6px 0 10px', color: 'var(--muted)'}}, 'Getting the link ready…'));
+  const showView = ok => viewBox.replaceChildren(h('strong', null, 'View-only link'),
+    h('p', {style: {margin: '6px 0 10px', color: 'var(--muted)'}}, ok ? 'People with this link can look, filter, download and make reels. They cannot add, tag, comment or remove anything.' : "View-only links aren't switched on for this site yet. The database needs its latest update."),
+    ok && linkRow('link-view', 'Look but not touch', view, A.view));
   openDlg(h('h2', null, 'Invite friends'),
-    h('p', {style: {margin: 0}}, 'Send this link to the people who were on the trip. Anyone who has it can see the album and add photos, so share it only with them.'),
-    h('div', {class: 'row'}, h('div', {class: 'field'}, h('label', {for: 'link-out'}, 'Invite link'), h('input', {id: 'link-out', readonly: true, value: link, onfocus: e => e.target.select()})),
-      h('button', {class: 'btn primary', type: 'button', onclick: async () => { try { await navigator.clipboard.writeText(link); toast('Link copied'); } catch (e){ $('#link-out').select(); toast('Select the link and copy it'); } }}, 'Copy link'),
-      navigator.share && h('button', {class: 'btn', type: 'button', onclick: () => navigator.share({title: S.trip.name + ' on Groupflicks', url: link}).catch(() => {})}, 'Share')),
+    !A.view && h('div', {class: 'panel'}, h('strong', null, 'Full link'),
+      h('p', {style: {margin: '6px 0 10px', color: 'var(--muted)'}}, 'For the people who were on the trip. Anyone who has it can see the album, add photos and remove their own.'),
+      linkRow('link-out', 'Can add photos', full, true)),
+    viewBox,
     h('p', {class: 'note'}, 'Photos, names and tags are encrypted on your device. The key is the part of the link after the #, which is never sent to the server. Keep the link somewhere safe: without it the album cannot be opened by anyone, including you.'),
-    !S.cloud && h('p', {class: 'note'}, 'Demo mode: this link only works in this tab until a server is set up.'));
+    !S.cloud && h('p', {class: 'note'}, 'Demo mode: links only work in this tab until a server is set up.'));
+  if (A.view || A.readSet) showView(true);
+  else BE.setRead(A.id, A.token, A.read).then(() => { A.readSet = true; showView(true); }, () => showView(false));
 }
 function albumDialog(){
   const status = h('span', {class: 'busy', id: 'del-status'});
@@ -625,7 +657,7 @@ function albumDialog(){
     h('div', {class: 'panel'}, h('strong', null, 'Delete album'),
       h('p', {style: {margin: '6px 0 12px', color: 'var(--muted)'}}, S.isOwner
         ? 'Permanently deletes every photo, tag and name in this album from the server, for everyone. Invite links stop working. This cannot be undone, so download anything you want to keep first.'
-        : 'Only the person who created this album can delete it, from the browser they created it in.'),
+        : A.view ? 'This is a view-only link, so the album cannot be changed from here.' : 'Only the person who created this album can delete it, from the browser they created it in.'),
       S.isOwner && h('div', {class: 'row'}, del, status)));
 }
 function nameDialog(){
@@ -759,7 +791,8 @@ function personDialog(e){
       e.id !== me && S.me.id !== 'anon' && h('button', {class: 'btn', type: 'button', onclick: async () => { await setMe(e.id); closeDlg(); }}, 'This is me'),
       S.canWrite && facesOf(e.id).length > 1 && h('button', {class: 'btn', type: 'button', onclick: () => separateDialog(e)}, 'Separate faces')));
 }
-async function setMe(pid){ try { await store.putMember(S.tripId, {me: pid}); toast("Got it. Use the Me filter to see your photos."); } catch (e){ S.members[S.me.id] = {...S.members[S.me.id], me: pid}; changed(); } }
+async function setMe(pid){ if (!S.canWrite){ LS.set('me.' + A.id, pid); toast('Got it. Use the Me filter to see your photos.'); changed(); return; }
+  try { await store.putMember(S.tripId, {me: pid}); toast("Got it. Use the Me filter to see your photos."); } catch (e){ S.members[S.me.id] = {...S.members[S.me.id], me: pid}; changed(); } }
 function findMeDialog(){
   const pick = async id => { await setMe(id); S.filter.people = [id]; S.filter.only = false; S.tab = 'photos'; closeDlg(); render(); };
   openDlg(h('h2', null, 'Which one is you?'),
@@ -1153,7 +1186,7 @@ function viewReel(){
 function goHome(){ Reel.stop(); closeTrip(); if (location.hash) history.pushState(null, '', location.pathname + location.search); render(); }
 function route(){
   const l = parseLink(location.hash);
-  if (l){ if (l.id !== S.tripId){ Reel.stop(); openTrip(l.id, l.secret); } }
+  if (l){ if (l.id !== S.tripId || l.view !== A.view){ Reel.stop(); openTrip(l.id, l.secret, l.view); } }
   else if (S.tripId){ Reel.stop(); closeTrip(); }
   changed();
 }
