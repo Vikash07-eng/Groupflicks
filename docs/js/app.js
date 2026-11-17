@@ -372,6 +372,15 @@ function sharpness(src){
   for (let y = 1; y < hh - 1; y++) for (let x = 1; x < w - 1; x++){ const i = y * w + x, l = 4 * g[i] - g[i - 1] - g[i + 1] - g[i - w] - g[i + w]; sum += l; sq += l * l; n++; }
   return Math.round(sq / n - (sum / n) ** 2);
 }
+/* a 64-bit fingerprint of how a picture looks: near-identical photos differ in only a few bits */
+function lookHash(src){
+  const cv = h('canvas', {width: 9, height: 8}), c = cv.getContext('2d', {willReadFrequently: true}); c.imageSmoothingQuality = 'high'; c.drawImage(fit(src, 64), 0, 0, 9, 8);
+  const d = c.getImageData(0, 0, 9, 8).data, g = i => d[i * 4] * .3 + d[i * 4 + 1] * .59 + d[i * 4 + 2] * .11; let hex = '';
+  for (let y = 0; y < 8; y++){ let byte = 0; for (let x = 0; x < 8; x++) byte = (byte << 1) | (g(y * 9 + x) > g(y * 9 + x + 1) ? 1 : 0); hex += byte.toString(16).padStart(2, '0'); }
+  return hex;
+}
+const BITS = Array.from({length: 256}, (_, i) => i.toString(2).split('1').length - 1);
+function hashGap(a, b){ if (!a || !b) return 64; let n = 0; for (let i = 0; i < 16; i += 2) n += BITS[parseInt(a.substr(i, 2), 16) ^ parseInt(b.substr(i, 2), 16)]; return n; }
 async function exifDate(file){
   try {
     const v = new DataView(await file.slice(0, 262144).arrayBuffer());
@@ -396,10 +405,10 @@ async function exifDate(file){
   return null;
 }
 async function addImage(source, takenAt){
-  const full = fit(source, 2048), thumb = fit(source, 480);
+  const full = fit(source, 2048), thumb = fit(source, 480), ph = lookHash(thumb);
   const [fb, tb] = await Promise.all([toBlob(full, .88), toBlob(thumb, .8)]);
   const ids = [randId(16), randId(16)]; await allow(ids, 'upload');
-  const data = {full: await store.upload(fb, ids[0]), thumb: await store.upload(tb, ids[1]), w: full.width, h: full.height, takenAt, at: Date.now(), by: S.me.id, sharp: sharpness(thumb)};
+  const data = {full: await store.upload(fb, ids[0]), thumb: await store.upload(tb, ids[1]), w: full.width, h: full.height, takenAt, at: Date.now(), by: S.me.id, sharp: sharpness(thumb), ph};
   if (Face.state === 'ready'){ try { data.faces = Face.assign(await Face.detect(fit(full, 1600))); } catch (e){} }
   const id = rid(9), tid = S.tripId; Face.busy.add(id);
   await retry(() => store.putPhoto(tid, id, data));
@@ -423,11 +432,11 @@ async function decodeImage(f){
   throw fail("This browser can't read this file. Use a JPEG, PNG, WebP or HEIC photo.");
 }
 /* uploads run one at a time through a queue, with a tray that shows progress and anything that failed */
-const Up = {queue: [], total: 0, done: 0, failed: [], running: false, current: '', album: null};
+const Up = {queue: [], total: 0, done: 0, failed: [], skipped: 0, running: false, current: '', album: null};
 function addFiles(files){
   files = [...files].filter(f => f.type.startsWith('image/') || /\.(jpe?g|png|webp|gif|avif|hei[cf])$/i.test(f.name));
   if (!files.length){ toast("Those files aren't photos."); return; }
-  if (!Up.running){ Up.total = 0; Up.done = 0; Up.failed = []; }
+  if (!Up.running){ Up.total = 0; Up.done = 0; Up.failed = []; Up.skipped = 0; }
   Up.queue.push(...files); Up.total += files.length; Up.album = A.id;
   if (Up.running) renderTray(); else runUploads();
 }
@@ -437,7 +446,8 @@ async function runUploads(){
     const f = Up.queue.shift(); Up.current = f.name; renderTray();
     try {
       if (A.id !== album) throw fail('The album was closed before this photo was added.');
-      const src = await decodeImage(f);
+      const src = await decodeImage(f), ph = lookHash(src);
+      if (S.photos.some(p => p.by === S.me.id && hashGap(p.ph, ph) <= 1)){ Up.skipped++; src.close?.(); Up.done++; renderTray(); continue; }
       await addImage(src, (await exifDate(f)) || f.lastModified || Date.now()); src.close?.();
     } catch (e){
       Up.failed.push({file: f, limit: !!e.limit, why: e.why || (e.status === 413 ? 'The file is too large for the album.' : e.status >= 400 && e.status < 500 ? "The album didn't accept it. It may be full or deleted." : 'The upload failed. Check your connection.')});
@@ -446,13 +456,14 @@ async function runUploads(){
     Up.done++; renderTray();
   }
   Up.running = false; Up.current = ''; renderTray();
-  if (!Up.failed.length){ toast(`Added ${plural(Up.total, 'photo')}.`); setTimeout(() => { if (!Up.running && !Up.failed.length) $('#tray').replaceChildren(); }, 2200); }
+  if (!Up.failed.length){ const added = Up.total - Up.skipped; toast((added ? `Added ${plural(added, 'photo')}.` : 'Nothing new to add.') + (Up.skipped ? ` Skipped ${Up.skipped} you had already added.` : '')); setTimeout(() => { if (!Up.running && !Up.failed.length) $('#tray').replaceChildren(); }, 2200); }
 }
 function renderTray(){
-  const tray = $('#tray'), ok = Up.done - Up.failed.length, pct = Up.total ? Math.round(Up.done / Up.total * 100) : 0;
+  const tray = $('#tray'), ok = Up.done - Up.failed.length - Up.skipped, pct = Up.total ? Math.round(Up.done / Up.total * 100) : 0;
   if (!Up.running && !Up.failed.length && !Up.total){ tray.replaceChildren(); return; }
   tray.replaceChildren(h('div', {class: 'tray', role: 'status'},
-    h('strong', null, Up.running ? `Adding photo ${Math.min(Up.done + 1, Up.total)} of ${Up.total}` : Up.failed.length ? `Added ${ok} of ${Up.total}. ${plural(Up.failed.length, 'photo')} didn't go through` : `Added ${plural(Up.total, 'photo')}`),
+    h('strong', null, Up.running ? `Adding photo ${Math.min(Up.done + 1, Up.total)} of ${Up.total}` : Up.failed.length ? `Added ${ok} of ${Up.total}. ${plural(Up.failed.length, 'photo')} didn't go through` : `Added ${plural(ok, 'photo')}`),
+    !Up.running && Up.skipped > 0 && h('span', {style: {color: 'var(--muted)', fontSize: '13px'}}, `Skipped ${Up.skipped} you had already added.`),
     h('div', {class: 'prog'}, h('i', {style: {width: pct + '%'}})),
     Up.running && h('span', {class: 'busy tray-name'}, Up.current),
     Up.running && h('span', {style: {color: 'var(--muted)', fontSize: '13px'}}, 'Keep this page open until it finishes.'),
@@ -597,6 +608,7 @@ function viewPhotos(){
           h('option', {value: ''}, 'Shot by anyone'), uploaders.map(u => h('option', {value: u, selected: S.filter.by === u || null}, 'Shot by ' + nameOf(u)))),
         (hm.size > 0 || S.filter.love) && h('select', {id: 'love-filter', 'aria-label': 'Filter by favourites', class: 'btn small quiet', onchange: e => { S.filter.love = e.target.value || null; S.sel.clear(); render(); }},
           h('option', {value: ''}, 'All photos'), h('option', {value: 'loved', selected: S.filter.love === 'loved' || null}, 'Most loved'), h('option', {value: 'mine', selected: S.filter.love === 'mine' || null}, 'My favourites')),
+        S.photos.length > 1 && h('button', {class: 'btn small quiet', type: 'button', onclick: duplicatesDialog}, 'Find duplicates'),
         list.length > 0 && h('button', {class: 'btn small', type: 'button', onclick: () => { S.selecting = !S.selecting; S.sel.clear(); render(); }}, S.selecting ? 'Done picking' : 'Pick photos'))),
     h('div', {class: 'sheet', id: 'sheet'}, frames.length ? frames : h('div', {class: 'empty'},
       h('strong', null, S.photos.length ? 'No photos match' : 'An empty roll'),
@@ -702,6 +714,47 @@ function tagDialog(list){
       h('div', {class: 'field'}, h('label', {for: 'new-person'}, 'Someone new'), h('input', {id: 'new-person', placeholder: 'Name', maxlength: 40})), h('button', {class: 'btn', type: 'submit'}, 'Add and tag')));
 }
 const canRemove = p => p.by === S.me.id || S.isOwner;
+/* groups of the same shot: identical-looking photos from anyone, and bursts one person took within seconds */
+async function findDuplicates(onStep){
+  const ps = [...S.photos].sort((a, b) => (a.takenAt || a.at) - (b.takenAt || b.at)), hash = new Map(); let n = 0;
+  for (const p of ps){
+    if (p.ph) hash.set(p.id, p.ph);
+    else { try { const bmp = await createImageBitmap(await store.blob(p.thumb)); hash.set(p.id, lookHash(bmp)); bmp.close?.(); } catch (e){} } // photos added before fingerprints existed
+    if (++n % 20 === 0) onStep?.(`Comparing photos… ${Math.round(n / ps.length * 100)}%`);
+  }
+  const parent = ps.map((_, i) => i), find = i => parent[i] === i ? i : (parent[i] = find(parent[i]));
+  for (let i = 0; i < ps.length; i++) for (let j = i + 1; j < ps.length; j++){
+    const gap = hashGap(hash.get(ps[i].id), hash.get(ps[j].id)), burst = ps[i].by === ps[j].by && Math.abs((ps[i].takenAt || ps[i].at) - (ps[j].takenAt || ps[j].at)) <= 4000;
+    if (gap <= 5 || (burst && gap <= 22)) parent[find(j)] = find(i);
+  }
+  const groups = new Map(); ps.forEach((p, i) => { const r = find(i); groups.set(r, [...(groups.get(r) || []), p]); });
+  const hm = heartMap(), rank = p => (hm.get(p.id) || 0) * 1e9 + (p.sharp || 0);
+  return [...groups.values()].filter(g => g.length > 1).map(g => ({photos: g, best: [...g].sort((a, b) => rank(b) - rank(a))[0], burst: new Set(g.map(p => p.by)).size === 1}));
+}
+async function duplicatesDialog(){
+  const status = h('span', {class: 'busy'}, 'Comparing photos…');
+  openDlg(h('h2', null, 'Find duplicates'), status);
+  let groups; try { groups = await findDuplicates(m => { status.textContent = m; }); } catch (e){ status.textContent = "Couldn't compare the photos. Check your connection."; return; }
+  const drop = new Set(); for (const g of groups) for (const p of g.photos) if (p !== g.best && canRemove(p) && S.canWrite) drop.add(p.id);
+  const count = h('strong'), go = h('button', {class: 'btn primary', type: 'button'}), sync = () => { count.textContent = drop.size ? `${plural(drop.size, 'photo')} marked to remove` : 'Nothing marked to remove'; go.textContent = `Remove ${drop.size} for everyone`; go.disabled = !drop.size; };
+  go.onclick = async () => {
+    if (!go.dataset.sure){ go.dataset.sure = 1; go.textContent = `Tap again to remove ${drop.size} for good`; return; }
+    go.disabled = true; let done = 0, bad = 0;
+    for (const id of drop){ const p = S.photos.find(x => x.id === id); status.textContent = `Removing ${++done} of ${drop.size}…`; if (p) try { await store.delPhoto(S.tripId, p); } catch (e){ bad++; } }
+    closeDlg(); toast(bad ? `Removed ${drop.size - bad}. ${plural(bad, 'photo')} couldn't be removed.` : `Removed ${plural(drop.size, 'duplicate')}.`);
+  };
+  if (!groups.length){ openDlg(h('h2', null, 'Find duplicates'), h('p', {style: {margin: 0}}, 'No duplicates or bursts found. Every photo in this album looks different.')); return; }
+  openDlg(h('h2', null, 'Find duplicates'),
+    h('p', {style: {margin: 0, color: 'var(--muted)'}}, `Found ${plural(groups.length, 'set')} of look-alike photos. The sharpest or most-loved one in each set is kept; tap any photo to switch it between keep and remove.`),
+    h('div', {class: 'dupes'}, groups.map(g => h('div', {class: 'panel'}, h('strong', null, g.burst ? `Burst of ${g.photos.length} by ${nameOf(g.photos[0].by)}` : `${g.photos.length} copies of the same shot`),
+      h('div', {class: 'shots'}, g.photos.map(p => {
+        const locked = !(S.canWrite && canRemove(p));
+        const b = h('button', {class: 'shot dupe', type: 'button', disabled: locked, 'aria-pressed': String(drop.has(p.id)), 'aria-label': drop.has(p.id) ? 'Marked to remove' : 'Keeping', onclick: () => { drop.has(p.id) ? drop.delete(p.id) : drop.add(p.id); b.setAttribute('aria-pressed', String(drop.has(p.id))); tag.textContent = drop.has(p.id) ? 'Remove' : 'Keep'; go.dataset.sure = ''; sync(); }}, lazyImg(p.thumb));
+        const tag = h('span', {class: 'dupe-tag'}, locked ? nameOf(p.by) + "'s" : drop.has(p.id) ? 'Remove' : 'Keep'); b.append(tag, p === g.best && h('span', {class: 'dupe-best'}, 'Best') || ''); return b;
+      }))))),
+    S.canWrite ? h('div', {class: 'row', style: {justifyContent: 'space-between', alignItems: 'center'}}, count, h('div', {class: 'row'}, status, go)) : h('p', {class: 'note'}, 'This is a view-only link, so nothing can be removed from here.'));
+  status.textContent = ''; sync();
+}
 function removeDialog(picked){
   const mine = picked.filter(canRemove), skip = picked.length - mine.length, status = h('span', {class: 'busy'});
   const go = h('button', {class: 'btn primary', type: 'button', onclick: async e => {

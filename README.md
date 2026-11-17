@@ -38,6 +38,15 @@ To run it locally, serve `docs/` on localhost: `python3 -m http.server 8000 --di
 | Automatic face grouping and selfie match | Written, not yet tested. Loads the face-api library and models from jsDelivr when the page opens; falls back to hand tagging if that fails. |
 | Install to home screen (manifest and offline shell) | Written, not yet tested on a phone |
 
+## Database updates
+
+`supabase/schema.sql` always holds the complete, current backend and can be re-run safely. If your project was set up earlier, running the dated scripts you have not run yet does the same job:
+
+| Script | Adds |
+| --- | --- |
+| `2026-11-16-lock-down-storage.sql` | Stops the photo bucket being listed |
+| `2026-11-17-view-links-and-limits.sql` | View-only links, permission-gated uploads and deletes, usage limits |
+
 ## Limits to know about
 
 - The link is the key. Anyone who gets it can see the album, add photos and remove photos. If everyone loses the link, the album cannot be recovered.
@@ -46,7 +55,8 @@ To run it locally, serve `docs/` on localhost: `python3 -m http.server 8000 --di
 - Photos stay until someone removes them. The person who created an album can delete the whole album, with its files, from Album options, in the browser they created it in.
 - Photos are resized to 2048 px before upload, so downloads are not the originals.
 - The photo bucket cannot be listed. Adding or deleting a file needs the album id and the file's random name, which only people with the invite link have. If you set the project up before 16 November 2026, run `supabase/2026-11-16-lock-down-storage.sql` once.
-- Nothing limits how many albums or uploads a visitor can create. Add rate limits before sharing the site widely.
+- Limits: 10 new albums an hour and 20 a day per network, 4,000 file uploads an hour per network, 2,000 photos per album, and uploads stop when stored files reach 900 MB. Change the numbers in `supabase/schema.sql` to suit your plan.
+- A view-only link lets people look, filter, download and make reels, and nothing else. It cannot be turned back into a full link.
 - The face-api script is loaded from a CDN without an integrity hash. Vendoring it into `docs/vendor/` would remove that trust.
 
 ## Licence

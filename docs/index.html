@@ -148,6 +148,13 @@ h1,h2,h3{font-family:var(--display);text-wrap:balance;margin:0;line-height:1.02;
 .shot{position:relative;background:var(--film);border:2px solid transparent;border-radius:6px;padding:0;overflow:hidden;display:grid}
 button.shot{cursor:pointer}
 .shot.spare{opacity:.45}
+.dupes{display:grid;gap:12px;max-height:52vh;overflow:auto}
+.dupes .panel{display:grid;gap:10px}
+.shot.dupe[aria-pressed="true"]{border-color:var(--grease)}
+.shot.dupe[aria-pressed="true"] img{opacity:.4}
+.shot.dupe[disabled]{cursor:default}
+.dupe-tag{font:500 11px var(--mono);color:var(--film-ink);padding:5px 6px;text-transform:uppercase;letter-spacing:.04em}
+.dupe-best{position:absolute;left:5px;top:5px;background:var(--edge);color:#111;border-radius:999px;padding:1px 7px;font:500 10px var(--mono)}
 .shot img{display:block;width:100%;aspect-ratio:1;object-fit:cover}
 .shot-btns{display:grid;grid-template-columns:repeat(3,1fr)}
 .shot-btns button{background:none;border:0;color:var(--film-ink);font:500 11px var(--mono);padding:7px 0;cursor:pointer}
