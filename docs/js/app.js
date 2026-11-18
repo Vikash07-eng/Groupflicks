@@ -531,7 +531,7 @@ function render(){
 function parseLink(text){ const m = (text || '').match(/\b([av])=([A-Za-z0-9_-]{16,40})\.([A-Za-z0-9_-]{40,50})/); return m ? {id: m[2], secret: m[3], view: m[1] === 'v'} : null; }
 const hashOf = t => (t.view ? 'v=' : 'a=') + t.id + '.' + t.secret;
 function viewHome(){
-  const colors = ['#c98b5a', '#6b93b8', '#d9a441', '#7fa58a', '#b86a6a', '#8d86b5'];
+  const colors = ['#4f86c6', '#2d6a9a', '#8fbbe3', '#3a8a96', '#d99a63', '#a9cbe8'];
   const strip = h('div', {class: 'strip', 'aria-hidden': 'true'}, colors.map((c, i) => h('span', {class: i === 4 ? 'pick' : '', style: {background: `linear-gradient(160deg, ${c}, #1a1c1f 140%)`}}, h('b', null, (i + 11) + 'A'))));
   const create = h('form', {class: 'panel', onsubmit: async e => {
     e.preventDefault(); const name = $('#trip-name').value.trim(); if (!name) return;
@@ -1138,12 +1138,12 @@ const Reel = {
     if (fx){ c.translate(W / 2 + (fx.dx || 0), H / 2 + (fx.dy || 0)); c.scale(fx.sc || 1, fx.sc || 1); c.translate(-W / 2, -H / 2); }
     c.globalAlpha = a; c.beginPath(); c.rect(0, 0, W, H); c.clip(); c.textBaseline = 'alphabetic';
     if (s.kind === 'shot'){
-      const rs = this.rects(s.lay, W, H, 10 * U); c.fillStyle = '#0b0c0d'; c.fillRect(0, 0, W, H);
+      const rs = this.rects(s.lay, W, H, 10 * U); c.fillStyle = '#06101f'; c.fillRect(0, 0, W, H);
       rs.forEach((r, i) => {
         const ke = rs.length > 1 ? ease(clamp((el - i * .08) / .32, 0, 1)) : 1; if (ke <= 0) return;
         c.globalAlpha = a * ke; this.cell(c, r[0], r[1] + (1 - ke) * 36 * U, r[2], r[3], s.ps[i], u, s.i + i, 1);
       });
-      c.globalAlpha = a; c.fillStyle = '#f0b429'; c.font = mono(19 * U); c.textBaseline = 'top'; c.fillText(`▸ ${String(s.n).padStart(2, '0')} / ${String(tl.shots).padStart(2, '0')}`, pad, pad); c.textBaseline = 'alphabetic';
+      c.globalAlpha = a; c.fillStyle = '#7fd1ff'; c.font = mono(19 * U); c.textBaseline = 'top'; c.fillText(`▸ ${String(s.n).padStart(2, '0')} / ${String(tl.shots).padStart(2, '0')}`, pad, pad); c.textBaseline = 'alphabetic';
       if (o.captions && s.lay === 'single' && s.t1 - s.t0 >= tl.beat * 2 - .01){
         const g = c.createLinearGradient(0, H * .78, 0, H); g.addColorStop(0, 'rgba(0,0,0,0)'); g.addColorStop(1, 'rgba(0,0,0,.6)'); c.fillStyle = g; c.fillRect(0, H * .78, W, H * .22);
         const k = ease(clamp(el / .3, 0, 1)), ms = s.ps[0].takenAt || s.ps[0].at; c.globalAlpha = a * k; c.font = mono(19 * U); c.fillStyle = 'rgba(255,255,255,.9)';
@@ -1160,7 +1160,7 @@ const Reel = {
       this.backdrop(c, W, H, s.ps[0], .6);
       const k = ease(clamp(el / .35, 0, 1)), size = 150 * U; c.globalAlpha = a * k; c.font = display(size); c.fillStyle = '#fff';
       c.fillText('Day ' + s.day, pad, H * .52 + (1 - k) * 40 * U);
-      c.fillStyle = '#f0b429'; c.fillRect(pad, H * .52 + 30 * U, (W - pad * 2) * ease(clamp(el / .6, 0, 1)), 4 * U);
+      c.fillStyle = '#7fd1ff'; c.fillRect(pad, H * .52 + 30 * U, (W - pad * 2) * ease(clamp(el / .6, 0, 1)), 4 * U);
       c.font = mono(24 * U); c.fillText(new Date(s.ms).toLocaleDateString(undefined, {weekday: 'long', day: 'numeric', month: 'long'}).toUpperCase(), pad, H * .52 + 78 * U);
     } else {
       if (s.kind === 'title'){ this.cell(c, 0, 0, W, H, s.ps[0], u * .8, 0, 1); c.fillStyle = 'rgba(8,9,10,.42)'; c.fillRect(0, 0, W, H); const g = c.createLinearGradient(0, H * .4, 0, H); g.addColorStop(0, 'rgba(0,0,0,0)'); g.addColorStop(1, 'rgba(0,0,0,.6)'); c.fillStyle = g; c.fillRect(0, H * .4, W, H * .6); }
@@ -1168,10 +1168,10 @@ const Reel = {
       const size = (W > H ? 96 : 108) * U; c.font = display(size); c.fillStyle = '#fff';
       const ls = this.lines(c, s.kind === 'title' ? title : 'Until next time', W - pad * 2), y0 = H * .58 - (ls.length - 1) * size * .5;
       ls.forEach((l, i) => { const k = ease(clamp((el - .12 - i * .12) / .5, 0, 1)); c.globalAlpha = a * k; c.fillText(l, pad, y0 + i * size * .98 + (1 - k) * 44 * U); });
-      const k2 = ease(clamp((el - .45 - ls.length * .12) / .5, 0, 1)); c.globalAlpha = a * k2; c.font = mono(22 * U); c.fillStyle = '#f0b429';
+      const k2 = ease(clamp((el - .45 - ls.length * .12) / .5, 0, 1)); c.globalAlpha = a * k2; c.font = mono(22 * U); c.fillStyle = '#7fd1ff';
       const sub = s.kind === 'title' ? [S.trip?.place, tl.range].filter(Boolean).join(' · ') : `${title} · ${plural(tl.pool, 'photo')} · ${plural(tl.people, 'photographer')}`;
       this.lines(c, sub.toUpperCase(), W - pad * 2).forEach((l, i) => c.fillText(l, pad, y0 + (ls.length - 1) * size * .98 + 48 * U + i * 30 * U));
-      c.globalAlpha = a; c.strokeStyle = '#ff4a32'; c.lineWidth = 7 * U; c.lineCap = 'round'; c.beginPath(); c.ellipse(pad + 34 * U, y0 - size - 30 * U, 34 * U, 24 * U, -.3, .3, .3 + Math.PI * 2 * clamp(el / .8, 0.001, 1)); c.stroke();
+      c.globalAlpha = a; c.strokeStyle = '#4cc3ff'; c.lineWidth = 7 * U; c.lineCap = 'round'; c.beginPath(); c.ellipse(pad + 34 * U, y0 - size - 30 * U, 34 * U, 24 * U, -.3, .3, .3 + Math.PI * 2 * clamp(el / .8, 0.001, 1)); c.stroke();
     }
     c.restore();
   },
@@ -1208,7 +1208,7 @@ const Reel = {
   draw(c, W, H, t){
     const tl = this.tl, segs = tl.segs; t = clamp(t, 0, tl.total - .001);
     const i = segs.findIndex(s => t < s.t1), s = segs[i], p = segs[i - 1], dt = t - s.t0, fast = x => x && (x.kind === 'flash' || x.kind === 'recap');
-    c.globalCompositeOperation = 'source-over'; c.globalAlpha = 1; c.imageSmoothingQuality = 'high'; c.fillStyle = '#0b0c0d'; c.fillRect(0, 0, W, H);
+    c.globalCompositeOperation = 'source-over'; c.globalAlpha = 1; c.imageSmoothingQuality = 'high'; c.fillStyle = '#06101f'; c.fillRect(0, 0, W, H);
     const quick = fast(s) || fast(p), X = quick || !p ? 0 : Math.min(.34, (s.t1 - s.t0) * .4); let flash = 0;
     if (X && dt < X){
       const k = ease(dt / X), mode = s.kind === 'card' || s.kind === 'outro' || p.kind === 'card' || p.kind === 'title' ? 'fade' : ['push', 'zoom', 'fade', 'up', 'zoom'][s.i % 5];
